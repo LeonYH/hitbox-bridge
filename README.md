@@ -18,9 +18,11 @@ The app bundle is written to:
 build/HitboxBridge.app
 ```
 
-Open the app, use the switch to start/stop the bridge, and use the key mapping
-pickers to change the emitted keyboard keys. Press `Apply` to save changes; the
-running app uses the new mapping immediately.
+Open the app, use the switch to start/stop the bridge, and click a key mapping
+button to record a new key from the keyboard. Recording supports letters,
+numbers, common punctuation keys, and Space. Press `Esc` while recording to
+cancel. Changes are saved immediately; `Apply` is still available as a manual
+save/release action.
 
 The app stores its key map at:
 

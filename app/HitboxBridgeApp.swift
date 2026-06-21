@@ -14,14 +14,7 @@ final class BridgeModel: ObservableObject {
     @Published var statusText = "Stopped"
     @Published var mappings: [ControlMapping]
     @Published var logText = ""
-
-    let keyChoices = [
-        "A", "S", "D", "F", "H", "G", "Z", "X", "C", "V", "B",
-        "Q", "W", "E", "R", "Y", "T", "U", "I", "O", "P", "J", "K", "L",
-        "M", "N", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0",
-        ";", "'", ",", ".", "/", "[", "]", "\\", "-", "=", "`",
-        "SPACE", "TAB", "ENTER", "ESC"
-    ]
+    @Published var recordingControl: String?
 
     private let defaults: [(String, String)] = [
         ("UP", "W"),
@@ -56,6 +49,18 @@ final class BridgeModel: ObservableObject {
         "TAB": 48, "SPACE": 49, "`": 50, "ESC": 53,
     ]
 
+    private let recordableKeyLabels: [UInt16: String] = [
+        0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G",
+        6: "Z", 7: "X", 8: "C", 9: "V", 11: "B",
+        12: "Q", 13: "W", 14: "E", 15: "R", 16: "Y", 17: "T",
+        18: "1", 19: "2", 20: "3", 21: "4", 22: "6", 23: "5",
+        24: "=", 25: "9", 26: "7", 27: "-", 28: "8", 29: "0",
+        30: "]", 31: "O", 32: "U", 33: "[", 34: "I", 35: "P",
+        37: "L", 38: "J", 39: "'", 40: "K", 41: ";",
+        42: "\\", 43: ",", 44: "/", 45: "N", 46: "M", 47: ".",
+        49: "SPACE", 50: "`",
+    ]
+
     private var process: Process?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
@@ -63,6 +68,7 @@ final class BridgeModel: ObservableObject {
     private var stdoutBuffer = ""
     private var activeControls: [String: CGKeyCode] = [:]
     private var keyDownCounts: [CGKeyCode: Int] = [:]
+    private var keyMonitor: Any?
 
     init() {
         mappings = defaults.map { ControlMapping(control: $0.0, key: $0.1) }
@@ -96,6 +102,20 @@ final class BridgeModel: ObservableObject {
         applyMappings()
     }
 
+    func beginRecording(control: String) {
+        recordingControl = control
+        appendLog("Recording \(control). Press a letter, number, punctuation key, or Space.\n")
+    }
+
+    func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            return self.handleRecordingEvent(event)
+        }
+    }
+
     func openAccessibilitySettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else {
             return
@@ -104,6 +124,10 @@ final class BridgeModel: ObservableObject {
     }
 
     func stopForAppQuit() {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+            self.keyMonitor = nil
+        }
         restartAfterTermination = false
         stopBridge()
     }
@@ -228,6 +252,36 @@ final class BridgeModel: ObservableObject {
         let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         let options = [promptKey: true] as CFDictionary
         return AXIsProcessTrustedWithOptions(options)
+    }
+
+    private func handleRecordingEvent(_ event: NSEvent) -> NSEvent? {
+        guard let control = recordingControl else {
+            return event
+        }
+
+        if event.keyCode == 53 {
+            recordingControl = nil
+            appendLog("Recording cancelled.\n")
+            return nil
+        }
+
+        guard let label = recordableKeyLabels[event.keyCode] else {
+            appendLog("Unsupported key. Use letters, numbers, punctuation, or Space.\n")
+            return nil
+        }
+
+        updateMapping(control: control, key: label)
+        recordingControl = nil
+        applyMappings()
+        appendLog("\(control) mapped to \(label).\n")
+        return nil
+    }
+
+    private func updateMapping(control: String, key: String) {
+        guard let index = mappings.firstIndex(where: { $0.control == control }) else {
+            return
+        }
+        mappings[index].key = key
     }
 
     private func handleStdout(_ text: String) {
@@ -402,16 +456,22 @@ struct ContentView: View {
                 GridItem(.fixed(88), alignment: .leading),
                 GridItem(.flexible(minimum: 120), alignment: .leading),
             ], alignment: .leading, spacing: 10) {
-                ForEach($model.mappings) { $mapping in
+                ForEach(model.mappings) { mapping in
                     Text(mapping.control)
                         .font(.system(.body, design: .monospaced).weight(.medium))
-                    Picker("", selection: $mapping.key) {
-                        ForEach(model.keyChoices, id: \.self) { key in
-                            Text(key).tag(key)
+                    Button {
+                        model.beginRecording(control: mapping.control)
+                    } label: {
+                        HStack {
+                            Text(model.recordingControl == mapping.control ? "Press key" : mapping.key)
+                                .font(.system(.body, design: .monospaced).weight(.semibold))
+                            Spacer()
+                            Image(systemName: model.recordingControl == mapping.control ? "keyboard.badge.ellipsis" : "keyboard")
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    .labelsHidden()
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .buttonStyle(.bordered)
                 }
             }
 
@@ -467,6 +527,7 @@ struct HitboxBridgeApp: App {
                 .environmentObject(model)
                 .onAppear {
                     appDelegate.model = model
+                    model.installKeyMonitor()
                 }
         }
         .windowStyle(.titleBar)
