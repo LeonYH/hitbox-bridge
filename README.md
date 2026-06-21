@@ -56,6 +56,8 @@ This only prints decoded button changes. Run until stopped:
 Default app key map:
 
 - Directions: `W A S D`
+- `P1 -> unmapped`
+- `P2 -> unmapped`
 - `X -> U`
 - `Y -> I`
 - `RB -> O`
@@ -66,6 +68,12 @@ Default app key map:
 - `RSB -> H`
 - `LB -> P`
 - `LT -> ;`
+
+`P1` and `P2` are exposed by the bridge only when the controller firmware
+reports those physical buttons in the USB input report. On some 8BitDo Arcade
+Controller for Xbox profiles they may be hardware-programmable buttons that are
+unassigned by default; in that case the app can save a keyboard mapping for
+them, but macOS will not receive a press until the controller reports one.
 
 If keyboard events are ignored, enable Accessibility permission for the app that
 launches the GUI, then rerun:

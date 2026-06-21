@@ -38,14 +38,19 @@ typedef struct {
     bool is_down;
 } AxisBinding;
 
+enum {
+    BIT_BINDING_COUNT = 12,
+    AXIS_BINDING_COUNT = 2,
+};
+
 struct HitboxBridge {
     HitboxBridgeEventCallback event_cb;
     HitboxBridgeLogCallback log_cb;
     void *context;
     volatile sig_atomic_t stop_requested;
     CFRunLoopRef run_loop;
-    BitBinding bit_bindings[12];
-    AxisBinding axis_bindings[2];
+    BitBinding bit_bindings[BIT_BINDING_COUNT];
+    AxisBinding axis_bindings[AXIS_BINDING_COUNT];
 };
 
 static const BitBinding bit_binding_defaults[] = {
@@ -359,7 +364,7 @@ static bool update_binding(HitboxBridge *bridge, const char *name, bool old_down
 }
 
 static void handle_input_packet(HitboxBridge *bridge, const uint8_t *data, UInt32 size) {
-    if (size < 10 || data[0] != 0x20) return;
+    if (data[0] != 0x20 || size < 10) return;
 
     for (size_t i = 0; i < sizeof(bridge->bit_bindings) / sizeof(bridge->bit_bindings[0]); i++) {
         BitBinding *b = &bridge->bit_bindings[i];
