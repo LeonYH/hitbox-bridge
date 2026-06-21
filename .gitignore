@@ -1,2 +1,4 @@
 .DS_Store
 build/
+/hitbox_bridge
+/usb_probe

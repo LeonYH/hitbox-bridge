@@ -8,9 +8,117 @@ struct ControlMapping: Identifiable, Equatable {
     var key: String
 }
 
+private final class InputEngine {
+    private let lock = NSLock()
+    private let eventSource = CGEventSource(stateID: .hidSystemState)
+    private var controlKeyCodes: [String: CGKeyCode] = [:]
+    private var activeControls: [String: CGKeyCode] = [:]
+    private var keyDownCounts: [CGKeyCode: Int] = [:]
+
+    func updateMappings(_ mappings: [String: CGKeyCode]) {
+        lock.lock()
+        releasePressedKeysLocked()
+        controlKeyCodes = mappings
+        lock.unlock()
+    }
+
+    func handle(control: String, down: Bool) {
+        lock.lock()
+        if down {
+            guard let keyCode = controlKeyCodes[control] else {
+                lock.unlock()
+                return
+            }
+            pressLocked(control: control, keyCode: keyCode)
+        } else {
+            releaseLocked(control: control)
+        }
+        lock.unlock()
+    }
+
+    func releasePressedKeys() {
+        lock.lock()
+        releasePressedKeysLocked()
+        lock.unlock()
+    }
+
+    private func pressLocked(control: String, keyCode: CGKeyCode) {
+        if let oldKeyCode = activeControls[control] {
+            if oldKeyCode == keyCode { return }
+            releaseKeyLocked(oldKeyCode)
+        }
+
+        activeControls[control] = keyCode
+        pressKeyLocked(keyCode)
+    }
+
+    private func releaseLocked(control: String) {
+        guard let keyCode = activeControls.removeValue(forKey: control) else { return }
+        releaseKeyLocked(keyCode)
+    }
+
+    private func pressKeyLocked(_ keyCode: CGKeyCode) {
+        let count = keyDownCounts[keyCode, default: 0]
+        keyDownCounts[keyCode] = count + 1
+        if count == 0 {
+            postKey(keyCode, down: true)
+        }
+    }
+
+    private func releaseKeyLocked(_ keyCode: CGKeyCode) {
+        let nextCount = max(0, keyDownCounts[keyCode, default: 0] - 1)
+        keyDownCounts[keyCode] = nextCount
+        if nextCount == 0 {
+            keyDownCounts.removeValue(forKey: keyCode)
+            postKey(keyCode, down: false)
+        }
+    }
+
+    private func releasePressedKeysLocked() {
+        for keyCode in keyDownCounts.keys {
+            postKey(keyCode, down: false)
+        }
+        activeControls.removeAll()
+        keyDownCounts.removeAll()
+    }
+
+    private func postKey(_ keyCode: CGKeyCode, down: Bool) {
+        guard let event = CGEvent(keyboardEventSource: eventSource, virtualKey: keyCode, keyDown: down) else {
+            return
+        }
+        event.setIntegerValueField(.keyboardEventAutorepeat, value: 0)
+        event.post(tap: .cghidEventTap)
+    }
+}
+
+private final class BridgeCallbackContext {
+    let engine: InputEngine
+    var logHandler: ((String) -> Void)?
+
+    init(engine: InputEngine) {
+        self.engine = engine
+    }
+}
+
+private func bridgeEventCallback(_ context: UnsafeMutableRawPointer?,
+                                 _ control: UnsafePointer<CChar>?,
+                                 _ down: Bool) {
+    guard let context, let control else { return }
+    let callbackContext = Unmanaged<BridgeCallbackContext>.fromOpaque(context).takeUnretainedValue()
+    callbackContext.engine.handle(control: String(cString: control), down: down)
+}
+
+private func bridgeLogCallback(_ context: UnsafeMutableRawPointer?,
+                               _ message: UnsafePointer<CChar>?) {
+    guard let context, let message else { return }
+    let callbackContext = Unmanaged<BridgeCallbackContext>.fromOpaque(context).takeUnretainedValue()
+    callbackContext.logHandler?(String(cString: message))
+}
+
 @MainActor
 final class BridgeModel: ObservableObject {
     @Published var isRunning = false
+    @Published var bridgeRunning = false
     @Published var statusText = "Stopped"
     @Published var mappings: [ControlMapping]
     @Published var logText = ""
@@ -32,10 +140,6 @@ final class BridgeModel: ObservableObject {
         ("RSB", "H"),
         ("LB", "P"),
         ("LT", ";"),
-    ]
-
-    private let controlNames: Set<String> = [
-        "UP", "DOWN", "LEFT", "RIGHT", "X", "Y", "RB", "A", "B", "RT", "LSB", "RSB", "LB", "LT"
     ]
 
     private let keyCodes: [String: CGKeyCode] = [
@@ -62,19 +166,19 @@ final class BridgeModel: ObservableObject {
         49: "SPACE", 50: "`",
     ]
 
-    private var process: Process?
-    private var stdoutPipe: Pipe?
-    private var stderrPipe: Pipe?
-    private var restartAfterTermination = false
-    private var stdoutBuffer = ""
-    private var activeControls: [String: CGKeyCode] = [:]
-    private var keyDownCounts: [CGKeyCode: Int] = [:]
+    private let inputEngine = InputEngine()
+    private lazy var callbackContext = BridgeCallbackContext(engine: inputEngine)
+    private let bridgeQueue = DispatchQueue(label: "com.local.hitboxbridge.usb", qos: .userInteractive)
+    private var bridge: OpaquePointer?
     private var keyMonitor: Any?
-    private let eventSource = CGEventSource(stateID: .hidSystemState)
+    private var reconnectWorkItem: DispatchWorkItem?
+    private var reconnectAttempt = 0
+    private var bridgeStartTime: Date?
 
     init() {
         mappings = defaults.map { ControlMapping(control: $0.0, key: $0.1) }
         loadMappings()
+        refreshControlKeyCodes()
     }
 
     var configURL: URL {
@@ -85,13 +189,23 @@ final class BridgeModel: ObservableObject {
     }
 
     func setBridgeEnabled(_ enabled: Bool) {
-        enabled ? startBridge() : stopBridge()
+        if enabled {
+            isRunning = true
+            reconnectAttempt = 0
+            cancelReconnect()
+            startBridge()
+        } else {
+            isRunning = false
+            cancelReconnect()
+            stopBridge()
+        }
     }
 
     func applyMappings() {
         do {
+            refreshControlKeyCodes()
             try saveMappings()
-            releasePressedKeys()
+            inputEngine.releasePressedKeys()
             appendLog("Saved keymap: \(configURL.path)\n")
         } catch {
             statusText = "Save failed"
@@ -139,15 +253,18 @@ final class BridgeModel: ObservableObject {
             NSEvent.removeMonitor(keyMonitor)
             self.keyMonitor = nil
         }
-        restartAfterTermination = false
+        isRunning = false
+        cancelReconnect()
         stopBridge()
     }
 
     private func startBridge() {
-        guard process == nil || process?.isRunning == false else { return }
+        guard isRunning else { return }
+        guard bridge == nil else { return }
 
         guard ensureAccessibilityPermission() else {
             isRunning = false
+            bridgeRunning = false
             statusText = "Accessibility needed"
             appendLog("Accessibility permission is required for the app before enabling the bridge.\n")
             return
@@ -156,103 +273,113 @@ final class BridgeModel: ObservableObject {
         do {
             try saveMappings()
         } catch {
+            isRunning = false
+            bridgeRunning = false
             statusText = "Save failed"
             appendLog("Save failed: \(error.localizedDescription)\n")
             return
         }
 
-        guard let helperURL = Bundle.main.url(forAuxiliaryExecutable: "hitbox_bridge") else {
-            statusText = "Helper missing"
-            appendLog("Cannot find bundled hitbox_bridge helper.\n")
+        callbackContext.logHandler = { [weak self] message in
+            Task { @MainActor in
+                self?.appendLog(message)
+            }
+        }
+
+        guard let nextBridge = hitbox_bridge_create(bridgeEventCallback,
+                                                    bridgeLogCallback,
+                                                    Unmanaged.passUnretained(callbackContext).toOpaque()) else {
+            isRunning = false
+            bridgeRunning = false
+            statusText = "Bridge unavailable"
+            appendLog("Cannot create embedded USB bridge.\n")
             return
         }
 
-        let stdout = Pipe()
-        let stderr = Pipe()
-        let child = Process()
-        child.executableURL = helperURL
-        child.arguments = ["--forever"]
-        child.standardOutput = stdout
-        child.standardError = stderr
+        appendLog("Starting embedded bridge...\n")
+        bridge = nextBridge
+        bridgeRunning = true
+        bridgeStartTime = Date()
+        statusText = "Running"
 
-        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            let text = String(decoding: data, as: UTF8.self)
+        let bridgeAddress = UInt(bitPattern: nextBridge)
+        bridgeQueue.async { [weak self, bridgeAddress] in
+            guard let runningBridge = OpaquePointer(bitPattern: bridgeAddress) else { return }
+
+            let status = hitbox_bridge_run(runningBridge, true, 0)
+
             Task { @MainActor in
-                self?.handleStdout(text)
+                if let self {
+                    self.handleTermination(bridge: runningBridge, status: status)
+                } else {
+                    hitbox_bridge_destroy(runningBridge)
+                }
             }
-        }
-
-        stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            let text = String(decoding: data, as: UTF8.self)
-            Task { @MainActor in
-                self?.appendLog(text)
-            }
-        }
-
-        child.terminationHandler = { [weak self] process in
-            let status = process.terminationStatus
-            Task { @MainActor in
-                self?.handleTermination(status: status)
-            }
-        }
-
-        do {
-            appendLog("Starting bridge...\n")
-            try child.run()
-            process = child
-            stdoutPipe = stdout
-            stderrPipe = stderr
-            stdoutBuffer = ""
-            isRunning = true
-            statusText = "Running"
-        } catch {
-            statusText = "Start failed"
-            appendLog("Start failed: \(error.localizedDescription)\n")
-            clearProcess()
         }
     }
 
     private func stopBridge() {
-        releasePressedKeys()
+        inputEngine.releasePressedKeys()
 
-        guard let process, process.isRunning else {
-            isRunning = false
+        guard let bridge else {
+            bridgeRunning = false
             statusText = "Stopped"
-            clearProcess()
             return
         }
 
-        statusText = restartAfterTermination ? "Restarting" : "Stopping"
-        process.terminate()
+        statusText = "Stopping"
+        hitbox_bridge_stop(bridge)
     }
 
-    private func handleTermination(status: Int32) {
-        releasePressedKeys()
-        clearProcess()
-        isRunning = false
+    private func handleTermination(bridge finishedBridge: OpaquePointer, status: Int32) {
+        guard bridge == finishedBridge else { return }
 
-        if restartAfterTermination {
-            restartAfterTermination = false
-            appendLog("Bridge stopped. Restarting with new keymap...\n")
-            startBridge()
+        if let bridgeStartTime, Date().timeIntervalSince(bridgeStartTime) > 10 {
+            reconnectAttempt = 0
+        }
+
+        inputEngine.releasePressedKeys()
+        hitbox_bridge_destroy(finishedBridge)
+        clearBridge()
+        bridgeRunning = false
+
+        if isRunning {
+            appendLog("Embedded bridge exited with status \(status). Reconnecting...\n")
+            scheduleReconnect()
             return
         }
 
-        statusText = status == 0 ? "Stopped" : "Exited \(status)"
-        appendLog("Bridge exited with status \(status).\n")
+        statusText = "Stopped"
+        appendLog("Embedded bridge exited with status \(status).\n")
     }
 
-    private func clearProcess() {
-        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
-        stderrPipe?.fileHandleForReading.readabilityHandler = nil
-        stdoutPipe = nil
-        stderrPipe = nil
-        process = nil
-        stdoutBuffer = ""
+    private func clearBridge() {
+        bridge = nil
+        bridgeStartTime = nil
+    }
+
+    private func cancelReconnect() {
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
+    }
+
+    private func scheduleReconnect() {
+        guard isRunning else { return }
+
+        cancelReconnect()
+        let delay = min(5.0, 0.5 * pow(2.0, Double(reconnectAttempt)))
+        reconnectAttempt += 1
+        statusText = "Reconnecting in \(String(format: "%.1f", delay))s"
+
+        let workItem = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self, self.isRunning else { return }
+                self.reconnectWorkItem = nil
+                self.startBridge()
+            }
+        }
+        reconnectWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     private func ensureAccessibilityPermission() -> Bool {
@@ -295,96 +422,6 @@ final class BridgeModel: ObservableObject {
         mappings[index].key = key
     }
 
-    private func handleStdout(_ text: String) {
-        appendLog(text)
-        stdoutBuffer.append(text)
-
-        while let newline = stdoutBuffer.range(of: "\n") {
-            let line = String(stdoutBuffer[..<newline.lowerBound])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            stdoutBuffer.removeSubrange(..<newline.upperBound)
-            handleEventLine(line)
-        }
-    }
-
-    private func handleEventLine(_ line: String) {
-        let parts = line.split(separator: " ")
-        guard parts.count == 2 else { return }
-
-        let control = String(parts[0]).uppercased()
-        let state = String(parts[1]).lowercased()
-        guard controlNames.contains(control), state == "down" || state == "up" else {
-            return
-        }
-
-        if state == "down" {
-            guard let keyCode = keyCodeForControl(control) else { return }
-            press(control: control, keyCode: keyCode)
-        } else {
-            release(control: control)
-        }
-    }
-
-    private func keyCodeForControl(_ control: String) -> CGKeyCode? {
-        guard let label = mappingDictionary()[control], let keyCode = keyCodes[label] else {
-            appendLog("No key code for \(control).\n")
-            return nil
-        }
-        return keyCode
-    }
-
-    private func mappingDictionary() -> [String: String] {
-        Dictionary(uniqueKeysWithValues: mappings.map { ($0.control, $0.key) })
-    }
-
-    private func press(control: String, keyCode: CGKeyCode) {
-        if let oldKeyCode = activeControls[control] {
-            if oldKeyCode == keyCode { return }
-            releaseKey(oldKeyCode)
-        }
-
-        activeControls[control] = keyCode
-        pressKey(keyCode)
-    }
-
-    private func release(control: String) {
-        guard let keyCode = activeControls.removeValue(forKey: control) else { return }
-        releaseKey(keyCode)
-    }
-
-    private func pressKey(_ keyCode: CGKeyCode) {
-        let count = keyDownCounts[keyCode, default: 0]
-        keyDownCounts[keyCode] = count + 1
-        if count == 0 {
-            postKey(keyCode, down: true)
-        }
-    }
-
-    private func releaseKey(_ keyCode: CGKeyCode) {
-        let nextCount = max(0, keyDownCounts[keyCode, default: 0] - 1)
-        keyDownCounts[keyCode] = nextCount
-        if nextCount == 0 {
-            keyDownCounts.removeValue(forKey: keyCode)
-            postKey(keyCode, down: false)
-        }
-    }
-
-    private func releasePressedKeys() {
-        for keyCode in keyDownCounts.keys {
-            postKey(keyCode, down: false)
-        }
-        activeControls.removeAll()
-        keyDownCounts.removeAll()
-    }
-
-    private func postKey(_ keyCode: CGKeyCode, down: Bool) {
-        guard let event = CGEvent(keyboardEventSource: eventSource, virtualKey: keyCode, keyDown: down) else {
-            return
-        }
-        event.setIntegerValueField(.keyboardEventAutorepeat, value: 0)
-        event.post(tap: .cghidEventTap)
-    }
-
     private func loadMappings() {
         guard let text = try? String(contentsOf: configURL, encoding: .utf8) else {
             return
@@ -403,6 +440,19 @@ final class BridgeModel: ObservableObject {
         mappings = defaults.map { pair in
             ControlMapping(control: pair.0, key: loaded[pair.0] ?? pair.1)
         }
+        refreshControlKeyCodes()
+    }
+
+    private func refreshControlKeyCodes() {
+        var next: [String: CGKeyCode] = [:]
+        for mapping in mappings {
+            guard let keyCode = keyCodes[mapping.key] else {
+                appendLog("No key code for \(mapping.control)=\(mapping.key).\n")
+                continue
+            }
+            next[mapping.control] = keyCode
+        }
+        inputEngine.updateMappings(next)
     }
 
     private func saveMappings() throws {
@@ -435,7 +485,7 @@ struct ContentView: View {
                     .font(.title2.weight(.semibold))
                 Spacer()
                 Text(model.statusText)
-                    .foregroundStyle(model.isRunning ? .green : .secondary)
+                    .foregroundStyle(model.bridgeRunning ? Color.green : (model.isRunning ? Color.orange : Color.secondary))
                 Toggle("Enabled", isOn: Binding(
                     get: { model.isRunning },
                     set: { model.setBridgeEnabled($0) }

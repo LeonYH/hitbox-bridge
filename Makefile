@@ -7,26 +7,31 @@ MACOS_DIR := $(CONTENTS_DIR)/MacOS
 ARCH := $(shell uname -m)
 SDKROOT := $(shell xcrun --show-sdk-path)
 MODULE_CACHE := $(BUILD_DIR)/ModuleCache
+CORE_OBJ := $(BUILD_DIR)/hitbox_bridge_core.o
+BRIDGE_SRCS := src/hitbox_bridge.c src/hitbox_bridge_core.c
+BRIDGE_HDRS := src/hitbox_bridge_core.h
+PROBE_SRC := tools/usb_probe.c
 
 .PHONY: all app clean
 
-all: app usb_probe
+all: app hitbox_bridge usb_probe
 
-app: $(MACOS_DIR)/$(APP_EXECUTABLE) $(MACOS_DIR)/hitbox_bridge $(CONTENTS_DIR)/Info.plist
+app: $(MACOS_DIR)/$(APP_EXECUTABLE) $(CONTENTS_DIR)/Info.plist
+	rm -f "$(MACOS_DIR)/hitbox_bridge"
 
-hitbox_bridge: hitbox_bridge.c
-	clang hitbox_bridge.c -framework IOKit -framework CoreFoundation -framework ApplicationServices -o hitbox_bridge
+hitbox_bridge: $(BRIDGE_SRCS) $(BRIDGE_HDRS)
+	clang $(BRIDGE_SRCS) -framework IOKit -framework CoreFoundation -o hitbox_bridge
 
-usb_probe: usb_probe.c
-	clang usb_probe.c -framework IOKit -framework CoreFoundation -o usb_probe
+usb_probe: $(PROBE_SRC)
+	clang $(PROBE_SRC) -framework IOKit -framework CoreFoundation -o usb_probe
 
-$(MACOS_DIR)/hitbox_bridge: hitbox_bridge.c
-	mkdir -p "$(MACOS_DIR)"
-	clang hitbox_bridge.c -framework IOKit -framework CoreFoundation -framework ApplicationServices -o "$@"
+$(CORE_OBJ): src/hitbox_bridge_core.c src/hitbox_bridge_core.h
+	mkdir -p "$(BUILD_DIR)"
+	clang -c src/hitbox_bridge_core.c -isysroot "$(SDKROOT)" -target "$(ARCH)-apple-macosx13.0" -o "$@"
 
-$(MACOS_DIR)/$(APP_EXECUTABLE): app/HitboxBridgeApp.swift
+$(MACOS_DIR)/$(APP_EXECUTABLE): app/HitboxBridgeApp.swift app/HitboxBridge-Bridging-Header.h $(CORE_OBJ)
 	mkdir -p "$(MACOS_DIR)" "$(MODULE_CACHE)"
-	xcrun swiftc app/HitboxBridgeApp.swift -parse-as-library -O -sdk "$(SDKROOT)" -target "$(ARCH)-apple-macosx13.0" -module-cache-path "$(MODULE_CACHE)" -o "$@"
+	xcrun swiftc app/HitboxBridgeApp.swift "$(CORE_OBJ)" -import-objc-header app/HitboxBridge-Bridging-Header.h -parse-as-library -O -sdk "$(SDKROOT)" -target "$(ARCH)-apple-macosx13.0" -module-cache-path "$(MODULE_CACHE)" -framework IOKit -framework CoreFoundation -o "$@"
 
 $(CONTENTS_DIR)/Info.plist: app/Info.plist
 	mkdir -p "$(CONTENTS_DIR)"
