@@ -6,6 +6,28 @@ on macOS.
 It configures the USB device, sends a minimal Xbox/GIP-style init sequence, reads
 the interrupt input endpoint, and maps the decoded controls to keyboard events.
 
+## Build the app
+
+```sh
+make app
+```
+
+The app bundle is written to:
+
+```sh
+build/HitboxBridge.app
+```
+
+Open the app, use the switch to start/stop the bridge, and use the key mapping
+pickers to change the emitted keyboard keys. Press `Apply` to save changes; the
+running app uses the new mapping immediately.
+
+The app stores its key map at:
+
+```sh
+~/Library/Application Support/8BitDo Hitbox Bridge/keymap.conf
+```
+
 ## Dry run
 
 ```sh
@@ -18,6 +40,12 @@ This only prints decoded button changes.
 
 ```sh
 ./hitbox_bridge --emit --seconds 3600
+```
+
+Run until stopped:
+
+```sh
+./hitbox_bridge --emit --forever
 ```
 
 Default key map:
@@ -34,12 +62,39 @@ Default key map:
 - `LB -> P`
 - `LT -> ;`
 
+Use a custom key map:
+
+```sh
+./hitbox_bridge --emit --forever --config keymap.conf
+```
+
+Config format:
+
+```txt
+UP=W
+DOWN=S
+LEFT=A
+RIGHT=D
+X=U
+Y=I
+RB=O
+A=J
+B=K
+RT=L
+LSB=Y
+RSB=H
+LB=P
+LT=;
+```
+
 If keyboard events are ignored, enable Accessibility permission for the app that
 launches this tool, then rerun:
 
 `System Settings > Privacy & Security > Accessibility`
 
 For example, enable Terminal, iTerm, or Codex depending on where you started it.
+When using the bundled app, enable `HitboxBridge.app`. The app runs the USB
+helper in decode-only mode and posts keyboard events from the app process.
 The target game/browser window must also be the focused foreground window.
 
 ## Probe tool

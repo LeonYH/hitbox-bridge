@@ -5,11 +5,13 @@
 #include <IOKit/usb/IOUSBLib.h>
 #include <IOKit/usb/USB.h>
 #include <mach/mach_error.h>
+#include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -18,7 +20,9 @@
 
 typedef struct {
     bool emit;
+    bool forever;
     int seconds;
+    const char *config_path;
 } Options;
 
 typedef struct {
@@ -33,6 +37,8 @@ typedef struct {
     uint8_t byte_index;
     uint8_t mask;
     CGKeyCode key;
+    const char *default_label;
+    char key_label[16];
     bool is_down;
 } BitBinding;
 
@@ -40,30 +46,50 @@ typedef struct {
     const char *name;
     uint8_t lo_index;
     CGKeyCode key;
+    const char *default_label;
+    char key_label[16];
     bool is_down;
 } AxisBinding;
 
+typedef struct {
+    const char *label;
+    CGKeyCode key;
+} KeyInfo;
+
 static volatile sig_atomic_t g_stop = 0;
 
-static BitBinding bit_bindings[] = {
-    {"UP",    5, 0x01, 13, false}, /* W */
-    {"DOWN",  5, 0x02, 1,  false}, /* S */
-    {"LEFT",  5, 0x04, 0,  false}, /* A */
-    {"RIGHT", 5, 0x08, 2,  false}, /* D */
+static const KeyInfo key_table[] = {
+    {"A", 0}, {"S", 1}, {"D", 2}, {"F", 3}, {"H", 4}, {"G", 5},
+    {"Z", 6}, {"X", 7}, {"C", 8}, {"V", 9}, {"B", 11},
+    {"Q", 12}, {"W", 13}, {"E", 14}, {"R", 15}, {"Y", 16}, {"T", 17},
+    {"1", 18}, {"2", 19}, {"3", 20}, {"4", 21}, {"6", 22}, {"5", 23},
+    {"=", 24}, {"9", 25}, {"7", 26}, {"-", 27}, {"8", 28}, {"0", 29},
+    {"]", 30}, {"O", 31}, {"U", 32}, {"[", 33}, {"I", 34}, {"P", 35},
+    {"ENTER", 36}, {"RETURN", 36}, {"L", 37}, {"J", 38}, {"'", 39},
+    {"K", 40}, {";", 41}, {"SEMICOLON", 41}, {"\\", 42}, {",", 43},
+    {"/", 44}, {"N", 45}, {"M", 46}, {".", 47}, {"TAB", 48},
+    {"SPACE", 49}, {"`", 50}, {"ESC", 53}, {"ESCAPE", 53},
+};
 
-    {"A",   4, 0x10, 38, false}, /* J */
-    {"B",   4, 0x20, 40, false}, /* K */
-    {"X",   4, 0x40, 32, false}, /* U */
-    {"Y",   4, 0x80, 34, false}, /* I */
-    {"LB",  5, 0x10, 35, false}, /* P */
-    {"RB",  5, 0x20, 31, false}, /* O */
-    {"LSB", 5, 0x40, 16, false}, /* Y */
-    {"RSB", 5, 0x80, 4,  false}, /* H */
+static BitBinding bit_bindings[] = {
+    {"UP",    5, 0x01, 13, "W", "", false},
+    {"DOWN",  5, 0x02, 1,  "S", "", false},
+    {"LEFT",  5, 0x04, 0,  "A", "", false},
+    {"RIGHT", 5, 0x08, 2,  "D", "", false},
+
+    {"A",   4, 0x10, 38, "J", "", false},
+    {"B",   4, 0x20, 40, "K", "", false},
+    {"X",   4, 0x40, 32, "U", "", false},
+    {"Y",   4, 0x80, 34, "I", "", false},
+    {"LB",  5, 0x10, 35, "P", "", false},
+    {"RB",  5, 0x20, 31, "O", "", false},
+    {"LSB", 5, 0x40, 16, "Y", "", false},
+    {"RSB", 5, 0x80, 4,  "H", "", false},
 };
 
 static AxisBinding axis_bindings[] = {
-    {"LT", 6, 41, false}, /* ; */
-    {"RT", 8, 37, false}, /* L */
+    {"LT", 6, 41, ";", "", false},
+    {"RT", 8, 37, "L", "", false},
 };
 
 static const char *ret_str(IOReturn err) {
@@ -101,16 +127,16 @@ static void post_key(CGKeyCode key, bool down) {
     CFRelease(source);
 }
 
-static void release_all_keys(void) {
+static void release_all_keys(bool emit) {
     for (size_t i = 0; i < sizeof(bit_bindings) / sizeof(bit_bindings[0]); i++) {
         if (bit_bindings[i].is_down) {
-            post_key(bit_bindings[i].key, false);
+            if (emit) post_key(bit_bindings[i].key, false);
             bit_bindings[i].is_down = false;
         }
     }
     for (size_t i = 0; i < sizeof(axis_bindings) / sizeof(axis_bindings[0]); i++) {
         if (axis_bindings[i].is_down) {
-            post_key(axis_bindings[i].key, false);
+            if (emit) post_key(axis_bindings[i].key, false);
             axis_bindings[i].is_down = false;
         }
     }
@@ -145,8 +171,134 @@ static void handle_signal(int sig) {
     g_stop = 1;
 }
 
+static void copy_key_label(char *dest, size_t dest_size, const char *label) {
+    snprintf(dest, dest_size, "%s", label);
+}
+
+static void init_key_labels(void) {
+    for (size_t i = 0; i < sizeof(bit_bindings) / sizeof(bit_bindings[0]); i++) {
+        copy_key_label(bit_bindings[i].key_label,
+                       sizeof(bit_bindings[i].key_label),
+                       bit_bindings[i].default_label);
+    }
+    for (size_t i = 0; i < sizeof(axis_bindings) / sizeof(axis_bindings[0]); i++) {
+        copy_key_label(axis_bindings[i].key_label,
+                       sizeof(axis_bindings[i].key_label),
+                       axis_bindings[i].default_label);
+    }
+}
+
+static const KeyInfo *find_key_info(const char *label) {
+    for (size_t i = 0; i < sizeof(key_table) / sizeof(key_table[0]); i++) {
+        if (!strcasecmp(label, key_table[i].label)) {
+            return &key_table[i];
+        }
+    }
+    return NULL;
+}
+
+static BitBinding *find_bit_binding(const char *name) {
+    for (size_t i = 0; i < sizeof(bit_bindings) / sizeof(bit_bindings[0]); i++) {
+        if (!strcasecmp(name, bit_bindings[i].name)) {
+            return &bit_bindings[i];
+        }
+    }
+    return NULL;
+}
+
+static AxisBinding *find_axis_binding(const char *name) {
+    for (size_t i = 0; i < sizeof(axis_bindings) / sizeof(axis_bindings[0]); i++) {
+        if (!strcasecmp(name, axis_bindings[i].name)) {
+            return &axis_bindings[i];
+        }
+    }
+    return NULL;
+}
+
+static char *trim(char *s) {
+    while (*s && isspace((unsigned char)*s)) s++;
+    if (!*s) return s;
+
+    char *end = s + strlen(s) - 1;
+    while (end > s && isspace((unsigned char)*end)) {
+        *end = '\0';
+        end--;
+    }
+    return s;
+}
+
+static bool apply_mapping(const char *control, const char *label) {
+    const KeyInfo *key = find_key_info(label);
+    if (!key) {
+        fprintf(stderr, "Unknown key label for %s: %s\n", control, label);
+        return false;
+    }
+
+    BitBinding *bit = find_bit_binding(control);
+    if (bit) {
+        bit->key = key->key;
+        copy_key_label(bit->key_label, sizeof(bit->key_label), key->label);
+        return true;
+    }
+
+    AxisBinding *axis = find_axis_binding(control);
+    if (axis) {
+        axis->key = key->key;
+        copy_key_label(axis->key_label, sizeof(axis->key_label), key->label);
+        return true;
+    }
+
+    fprintf(stderr, "Unknown control in keymap: %s\n", control);
+    return false;
+}
+
+static bool load_keymap(const char *path) {
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        perror(path);
+        return false;
+    }
+
+    char line[256];
+    unsigned int line_no = 0;
+    while (fgets(line, sizeof(line), file)) {
+        line_no++;
+
+        char *comment = strchr(line, '#');
+        if (comment) *comment = '\0';
+
+        char *eq = strchr(line, '=');
+        if (!eq) {
+            if (*trim(line)) {
+                fprintf(stderr, "%s:%u: expected CONTROL=KEY\n", path, line_no);
+            }
+            continue;
+        }
+
+        *eq = '\0';
+        char *control = trim(line);
+        char *label = trim(eq + 1);
+        if (!*control || !*label) {
+            fprintf(stderr, "%s:%u: expected CONTROL=KEY\n", path, line_no);
+            continue;
+        }
+
+        apply_mapping(control, label);
+    }
+
+    fclose(file);
+    return true;
+}
+
 static void print_keymap(void) {
-    printf("Key map: UP=W DOWN=S LEFT=A RIGHT=D, X=U Y=I A=J B=K RB=O LB=P RT=L LT=; LSB=Y RSB=H\n");
+    printf("Key map:");
+    for (size_t i = 0; i < sizeof(bit_bindings) / sizeof(bit_bindings[0]); i++) {
+        printf(" %s=%s", bit_bindings[i].name, bit_bindings[i].key_label);
+    }
+    for (size_t i = 0; i < sizeof(axis_bindings) / sizeof(axis_bindings[0]); i++) {
+        printf(" %s=%s", axis_bindings[i].name, axis_bindings[i].key_label);
+    }
+    printf("\n");
 }
 
 static IOReturn create_device_interface(io_service_t service, IOUSBDeviceInterface ***dev_out) {
@@ -358,6 +510,7 @@ static void read_cb(void *refcon, IOReturn result, void *arg0) {
 static bool update_binding(const char *name, bool old_down, bool new_down, CGKeyCode key, bool emit) {
     if (old_down == new_down) return old_down;
     printf("%s %s\n", name, new_down ? "down" : "up");
+    fflush(stdout);
     if (emit) post_key(key, new_down);
     return new_down;
 }
@@ -424,13 +577,17 @@ static int run_bridge(const Options *opts) {
     CFRunLoopAddSource(CFRunLoopGetCurrent(), async_source, kCFRunLoopDefaultMode);
 
     print_keymap();
-    printf("%s for %d seconds. Press Ctrl-C to stop.\n", opts->emit ? "Emitting keyboard events" : "Dry-run decoding", opts->seconds);
+    if (opts->forever) {
+        printf("%s until stopped. Press Ctrl-C to stop.\n", opts->emit ? "Emitting keyboard events" : "Dry-run decoding");
+    } else {
+        printf("%s for %d seconds. Press Ctrl-C to stop.\n", opts->emit ? "Emitting keyboard events" : "Dry-run decoding", opts->seconds);
+    }
     init_gip(intf, out_pipe);
 
-    CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + opts->seconds;
+    CFAbsoluteTime deadline = opts->forever ? 0 : CFAbsoluteTimeGetCurrent() + opts->seconds;
     bool pending = false;
     ReadContext ctx = {0};
-    while (!g_stop && CFAbsoluteTimeGetCurrent() < deadline) {
+    while (!g_stop && (opts->forever || CFAbsoluteTimeGetCurrent() < deadline)) {
         if (!pending) {
             memset(&ctx, 0, sizeof(ctx));
             kr = (*intf)->ReadPipeAsync(intf, in_pipe, ctx.data, sizeof(ctx.data), read_cb, &ctx);
@@ -456,7 +613,7 @@ static int run_bridge(const Options *opts) {
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, true);
     }
 
-    release_all_keys();
+    release_all_keys(opts->emit);
     CFRunLoopRemoveSource(CFRunLoopGetCurrent(), async_source, kCFRunLoopDefaultMode);
     CFRelease(async_source);
     (*intf)->USBInterfaceClose(intf);
@@ -467,16 +624,20 @@ static int run_bridge(const Options *opts) {
 }
 
 static Options parse_args(int argc, char **argv) {
-    Options opts = {.emit = false, .seconds = 60};
+    Options opts = {.emit = false, .forever = false, .seconds = 60, .config_path = NULL};
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--emit")) {
             opts.emit = true;
+        } else if (!strcmp(argv[i], "--forever")) {
+            opts.forever = true;
         } else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) {
             opts.seconds = atoi(argv[++i]);
             if (opts.seconds < 1) opts.seconds = 1;
             if (opts.seconds > 3600) opts.seconds = 3600;
+        } else if (!strcmp(argv[i], "--config") && i + 1 < argc) {
+            opts.config_path = argv[++i];
         } else {
-            fprintf(stderr, "Usage: %s [--emit] [--seconds N]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [--emit] [--forever] [--seconds N] [--config keymap.conf]\n", argv[0]);
             exit(2);
         }
     }
@@ -484,7 +645,12 @@ static Options parse_args(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
     Options opts = parse_args(argc, argv);
+    init_key_labels();
+    if (opts.config_path && !load_keymap(opts.config_path)) {
+        return 2;
+    }
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
     return run_bridge(&opts);
