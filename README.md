@@ -4,7 +4,42 @@ This is a first-pass user-space bridge for `8BitDo Arcade Controller for Xbox`
 on macOS.
 
 It configures the USB device, sends a minimal Xbox/GIP-style init sequence, reads
-the interrupt input endpoint, and maps the decoded controls to keyboard events.
+the interrupt input endpoint, and maps decoded control events to keyboard events
+inside the macOS app process.
+
+## Build the app
+
+```sh
+make app
+```
+
+The app bundle is written to:
+
+```sh
+build/HitboxBridge.app
+```
+
+Open the app, use the switch to start/stop the bridge, and click a key mapping
+button to record a new key from the keyboard. Recording supports letters,
+numbers, common punctuation keys, and Space. Press `Esc` while recording to
+cancel. Changes are saved immediately; `Apply` is still available as a manual
+save/release action. The runtime log is off by default; turn on `Log` only when
+you need to inspect bridge output. If the controller is disconnected or the USB
+bridge exits, the app keeps the switch enabled and automatically reconnects with
+a capped backoff.
+
+The app stores its key map at:
+
+```sh
+~/Library/Application Support/8BitDo Hitbox Bridge/keymap.conf
+```
+
+## Project layout
+
+- `app/`: SwiftUI app, bridging header, and app bundle metadata.
+- `src/`: embeddable C USB bridge core plus the CLI debug wrapper.
+- `tools/`: USB probe/debug utility source.
+- `build/`: generated app bundle, objects, and compiler module cache.
 
 ## Dry run
 
@@ -12,17 +47,17 @@ the interrupt input endpoint, and maps the decoded controls to keyboard events.
 ./hitbox_bridge --seconds 20
 ```
 
-This only prints decoded button changes.
-
-## Emit keyboard
+This only prints decoded button changes. Run until stopped:
 
 ```sh
-./hitbox_bridge --emit --seconds 3600
+./hitbox_bridge --forever
 ```
 
-Default key map:
+Default app key map:
 
 - Directions: `W A S D`
+- `P1 -> unmapped`
+- `P2 -> unmapped`
 - `X -> U`
 - `Y -> I`
 - `RB -> O`
@@ -34,12 +69,19 @@ Default key map:
 - `LB -> P`
 - `LT -> ;`
 
+`P1` and `P2` are exposed by the bridge only when the controller firmware
+reports those physical buttons in the USB input report. On some 8BitDo Arcade
+Controller for Xbox profiles they may be hardware-programmable buttons that are
+unassigned by default; in that case the app can save a keyboard mapping for
+them, but macOS will not receive a press until the controller reports one.
+
 If keyboard events are ignored, enable Accessibility permission for the app that
-launches this tool, then rerun:
+launches the GUI, then rerun:
 
 `System Settings > Privacy & Security > Accessibility`
 
-For example, enable Terminal, iTerm, or Codex depending on where you started it.
+Enable `HitboxBridge.app`. The app embeds the USB bridge and posts keyboard
+events from the app process.
 The target game/browser window must also be the focused foreground window.
 
 ## Probe tool
