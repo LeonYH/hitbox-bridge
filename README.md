@@ -22,7 +22,8 @@ Open the app, use the switch to start/stop the bridge, and click a key mapping
 button to record a new key from the keyboard. Recording supports letters,
 numbers, common punctuation keys, and Space. Press `Esc` while recording to
 cancel. Changes are saved immediately; `Apply` is still available as a manual
-save/release action.
+save/release action. The runtime log is off by default; turn on `Log` only when
+you need to inspect helper output.
 
 The app stores its key map at:
 

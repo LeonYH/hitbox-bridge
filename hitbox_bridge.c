@@ -57,6 +57,7 @@ typedef struct {
 } KeyInfo;
 
 static volatile sig_atomic_t g_stop = 0;
+static CGEventSourceRef g_event_source = NULL;
 
 static const KeyInfo key_table[] = {
     {"A", 0}, {"S", 1}, {"D", 2}, {"F", 3}, {"H", 4}, {"G", 5},
@@ -119,12 +120,24 @@ static long prop_i64(io_service_t service, CFStringRef key, long fallback) {
 }
 
 static void post_key(CGKeyCode key, bool down) {
-    CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
-    CGEventRef event = CGEventCreateKeyboardEvent(source, key, down);
+    if (!g_event_source) {
+        g_event_source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
+        if (!g_event_source) return;
+    }
+
+    CGEventRef event = CGEventCreateKeyboardEvent(g_event_source, key, down);
+    if (!event) return;
+
     CGEventSetIntegerValueField(event, kCGKeyboardEventAutorepeat, 0);
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
-    CFRelease(source);
+}
+
+static void cleanup_event_source(void) {
+    if (g_event_source) {
+        CFRelease(g_event_source);
+        g_event_source = NULL;
+    }
 }
 
 static void release_all_keys(bool emit) {
@@ -510,7 +523,6 @@ static void read_cb(void *refcon, IOReturn result, void *arg0) {
 static bool update_binding(const char *name, bool old_down, bool new_down, CGKeyCode key, bool emit) {
     if (old_down == new_down) return old_down;
     printf("%s %s\n", name, new_down ? "down" : "up");
-    fflush(stdout);
     if (emit) post_key(key, new_down);
     return new_down;
 }
@@ -653,5 +665,7 @@ int main(int argc, char **argv) {
     }
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
-    return run_bridge(&opts);
+    int result = run_bridge(&opts);
+    cleanup_event_source();
+    return result;
 }

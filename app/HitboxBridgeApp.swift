@@ -15,6 +15,7 @@ final class BridgeModel: ObservableObject {
     @Published var mappings: [ControlMapping]
     @Published var logText = ""
     @Published var recordingControl: String?
+    @Published var logsEnabled = false
 
     private let defaults: [(String, String)] = [
         ("UP", "W"),
@@ -69,6 +70,7 @@ final class BridgeModel: ObservableObject {
     private var activeControls: [String: CGKeyCode] = [:]
     private var keyDownCounts: [CGKeyCode: Int] = [:]
     private var keyMonitor: Any?
+    private let eventSource = CGEventSource(stateID: .hidSystemState)
 
     init() {
         mappings = defaults.map { ControlMapping(control: $0.0, key: $0.1) }
@@ -100,6 +102,15 @@ final class BridgeModel: ObservableObject {
     func resetDefaults() {
         mappings = defaults.map { ControlMapping(control: $0.0, key: $0.1) }
         applyMappings()
+    }
+
+    func setLogsEnabled(_ enabled: Bool) {
+        logsEnabled = enabled
+        if enabled {
+            appendLog("Log enabled.\n")
+        } else {
+            logText = ""
+        }
     }
 
     func beginRecording(control: String) {
@@ -367,8 +378,7 @@ final class BridgeModel: ObservableObject {
     }
 
     private func postKey(_ keyCode: CGKeyCode, down: Bool) {
-        let source = CGEventSource(stateID: .hidSystemState)
-        guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: down) else {
+        guard let event = CGEvent(keyboardEventSource: eventSource, virtualKey: keyCode, keyDown: down) else {
             return
         }
         event.setIntegerValueField(.keyboardEventAutorepeat, value: 0)
@@ -406,6 +416,8 @@ final class BridgeModel: ObservableObject {
     }
 
     private func appendLog(_ text: String) {
+        guard logsEnabled else { return }
+
         logText.append(text)
         if logText.count > 12_000 {
             logText.removeFirst(logText.count - 12_000)
@@ -481,6 +493,11 @@ struct ContentView: View {
                 Label("Bridge Log", systemImage: "terminal")
                     .font(.headline)
                 Spacer()
+                Toggle("Log", isOn: Binding(
+                    get: { model.logsEnabled },
+                    set: { model.setLogsEnabled($0) }
+                ))
+                .toggleStyle(.switch)
                 Button {
                     model.openAccessibilitySettings()
                 } label: {
@@ -488,20 +505,22 @@ struct ContentView: View {
                 }
             }
 
-            ScrollView {
-                Text(model.logText.isEmpty ? "No log output yet." : model.logText)
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-                    .padding(10)
+            if model.logsEnabled {
+                ScrollView {
+                    Text(model.logText.isEmpty ? "No log output yet." : model.logText)
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .padding(10)
+                }
+                .frame(minHeight: 140)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color(nsColor: .separatorColor))
+                )
             }
-            .frame(minHeight: 140)
-            .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color(nsColor: .separatorColor))
-            )
         }
         .padding(20)
         .frame(minWidth: 620, minHeight: 560)
