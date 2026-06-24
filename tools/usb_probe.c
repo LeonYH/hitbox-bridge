@@ -4,6 +4,7 @@
 #include <IOKit/usb/IOUSBLib.h>
 #include <IOKit/usb/USB.h>
 #include <mach/mach_error.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -26,9 +27,11 @@ typedef struct {
 } Options;
 
 typedef struct {
-    bool done;
+    atomic_int references;
+    atomic_bool done;
     IOReturn result;
     UInt32 size;
+    uint8_t data[128];
 } AsyncReadContext;
 
 typedef struct {
@@ -47,7 +50,7 @@ static const char *ret_str(IOReturn err) {
 }
 
 static uint16_t le16(const uint8_t *p) {
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+    return (uint16_t)((uint16_t)p[0] | (uint16_t)((uint16_t)p[1] << 8));
 }
 
 static CFNumberRef cfnum_u16(uint16_t value) {
@@ -71,7 +74,7 @@ static void prop_string(io_service_t service, CFStringRef key, char *out, size_t
     CFTypeRef value = IORegistryEntryCreateCFProperty(service, key, kCFAllocatorDefault, 0);
     if (!value) return;
     if (CFGetTypeID(value) == CFStringGetTypeID()) {
-        CFStringGetCString((CFStringRef)value, out, out_size, kCFStringEncodingUTF8);
+        CFStringGetCString((CFStringRef)value, out, (CFIndex)out_size, kCFStringEncodingUTF8);
     }
     CFRelease(value);
 }
@@ -84,11 +87,22 @@ static void print_hex(const uint8_t *buf, size_t len) {
     printf("\n");
 }
 
+static void async_read_context_retain(AsyncReadContext *ctx) {
+    atomic_fetch_add_explicit(&ctx->references, 1, memory_order_relaxed);
+}
+
+static void async_read_context_release(AsyncReadContext *ctx) {
+    if (atomic_fetch_sub_explicit(&ctx->references, 1, memory_order_acq_rel) == 1) {
+        free(ctx);
+    }
+}
+
 static void async_read_cb(void *refcon, IOReturn result, void *arg0) {
     AsyncReadContext *ctx = (AsyncReadContext *)refcon;
-    ctx->done = true;
     ctx->result = result;
     ctx->size = (UInt32)(uintptr_t)arg0;
+    atomic_store_explicit(&ctx->done, true, memory_order_release);
+    async_read_context_release(ctx);
 }
 
 static void write_packet(IOUSBInterfaceInterface **intf,
@@ -123,38 +137,57 @@ static void send_gip_init(IOUSBInterfaceInterface **intf, UInt8 out_pipe) {
 
 static void read_from_pipe(IOUSBInterfaceInterface **intf, UInt8 pipe, int reads) {
     for (int i = 0; i < reads; i++) {
-        uint8_t buf[128] = {0};
-        AsyncReadContext ctx = {
-            .done = false,
-            .result = kIOReturnTimeout,
-            .size = 0,
-        };
+        AsyncReadContext *ctx = calloc(1, sizeof(*ctx));
+        if (!ctx) {
+            printf("      read %d: cannot allocate async context\n", i + 1);
+            return;
+        }
+        atomic_init(&ctx->references, 1);
+        atomic_init(&ctx->done, false);
+        ctx->result = kIOReturnTimeout;
 
-        IOReturn rkr = (*intf)->ReadPipeAsync(intf, pipe, buf, sizeof(buf), async_read_cb, &ctx);
+        async_read_context_retain(ctx);
+        IOReturn rkr = (*intf)->ReadPipeAsync(
+            intf,
+            pipe,
+            ctx->data,
+            sizeof(ctx->data),
+            async_read_cb,
+            ctx
+        );
         if (rkr == kIOReturnSuccess) {
             CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 1.0;
-            while (!ctx.done && CFAbsoluteTimeGetCurrent() < deadline) {
+            while (!atomic_load_explicit(&ctx->done, memory_order_acquire) &&
+                   CFAbsoluteTimeGetCurrent() < deadline) {
                 CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, true);
             }
-            if (!ctx.done) {
+            if (!atomic_load_explicit(&ctx->done, memory_order_acquire)) {
                 (*intf)->AbortPipe(intf, pipe);
-                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.20, true);
+                CFAbsoluteTime abort_deadline = CFAbsoluteTimeGetCurrent() + 1.0;
+                while (!atomic_load_explicit(&ctx->done, memory_order_acquire) &&
+                       CFAbsoluteTimeGetCurrent() < abort_deadline) {
+                    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, true);
+                }
                 (*intf)->ClearPipeStallBothEnds(intf, pipe);
                 (*intf)->ResetPipe(intf, pipe);
-                if (!ctx.done) {
-                    ctx.result = kIOReturnTimeout;
+                if (!atomic_load_explicit(&ctx->done, memory_order_acquire)) {
+                    printf("      read %d: cancellation did not complete; stopping reads\n", i + 1);
+                    async_read_context_release(ctx);
+                    return;
                 }
             }
         } else {
-            ctx.result = rkr;
+            async_read_context_release(ctx);
+            ctx->result = rkr;
         }
 
-        printf("      read %d: 0x%08x %s size=%u", i + 1, ctx.result, ret_str(ctx.result), ctx.size);
-        if (ctx.result == kIOReturnSuccess && ctx.size > 0) {
+        printf("      read %d: 0x%08x %s size=%u", i + 1, ctx->result, ret_str(ctx->result), ctx->size);
+        if (ctx->result == kIOReturnSuccess && ctx->size > 0) {
             printf(" data=");
-            for (UInt32 j = 0; j < ctx.size; j++) printf("%02x", buf[j]);
+            for (UInt32 j = 0; j < ctx->size; j++) printf("%02x", ctx->data[j]);
         }
         printf("\n");
+        async_read_context_release(ctx);
     }
 }
 
@@ -531,7 +564,8 @@ static void probe_device(io_service_t service, const Options *opts, int index) {
         printf("  %s: 0x%08x %s\n", opts->seize ? "USBDeviceOpenSeize" : "USBDeviceOpen", open_kr, ret_str(open_kr));
         if (open_kr == kIOReturnSuccess) {
             IOUSBConfigurationDescriptorPtr cfg = NULL;
-            kr = (*dev)->GetConfigurationDescriptorPtr(dev, 0, &cfg);
+            IOReturn cfg_kr = (*dev)->GetConfigurationDescriptorPtr(dev, 0, &cfg);
+            printf("  GetConfigurationDescriptorPtr: 0x%08x %s\n", cfg_kr, ret_str(cfg_kr));
             UInt8 config_value = cfg ? cfg->bConfigurationValue : 1;
             IOReturn set_kr = (*dev)->SetConfiguration(dev, config_value);
             printf("  SetConfiguration(%u): 0x%08x %s\n", config_value, set_kr, ret_str(set_kr));

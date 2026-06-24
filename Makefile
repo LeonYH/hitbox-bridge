@@ -4,6 +4,7 @@ BUILD_DIR := build
 APP_DIR := $(BUILD_DIR)/$(APP_NAME).app
 CONTENTS_DIR := $(APP_DIR)/Contents
 MACOS_DIR := $(CONTENTS_DIR)/MacOS
+RESOURCES_DIR := $(CONTENTS_DIR)/Resources
 ARCH := $(shell uname -m)
 SDKROOT := $(shell xcrun --show-sdk-path)
 MODULE_CACHE := $(BUILD_DIR)/ModuleCache
@@ -11,13 +12,16 @@ CORE_OBJ := $(BUILD_DIR)/hitbox_bridge_core.o
 BRIDGE_SRCS := src/hitbox_bridge.c src/hitbox_bridge_core.c
 BRIDGE_HDRS := src/hitbox_bridge_core.h
 PROBE_SRC := tools/usb_probe.c
+APP_ICON := app/AppIcon.icns
+APP_ICON_NAME := EightBitDoAppIcon.icns
+APP_SIGN_IDENTITY ?= -
 
 .PHONY: all app clean
 
 all: app hitbox_bridge usb_probe
 
-app: $(MACOS_DIR)/$(APP_EXECUTABLE) $(CONTENTS_DIR)/Info.plist
-	rm -f "$(MACOS_DIR)/hitbox_bridge"
+app: $(MACOS_DIR)/$(APP_EXECUTABLE) $(CONTENTS_DIR)/Info.plist $(RESOURCES_DIR)/$(APP_ICON_NAME)
+	codesign --force --sign "$(APP_SIGN_IDENTITY)" --timestamp=none "$(APP_DIR)"
 
 hitbox_bridge: $(BRIDGE_SRCS) $(BRIDGE_HDRS)
 	clang $(BRIDGE_SRCS) -framework IOKit -framework CoreFoundation -o hitbox_bridge
@@ -36,6 +40,10 @@ $(MACOS_DIR)/$(APP_EXECUTABLE): app/HitboxBridgeApp.swift app/HitboxBridge-Bridg
 $(CONTENTS_DIR)/Info.plist: app/Info.plist
 	mkdir -p "$(CONTENTS_DIR)"
 	cp app/Info.plist "$@"
+
+$(RESOURCES_DIR)/$(APP_ICON_NAME): $(APP_ICON)
+	mkdir -p "$(RESOURCES_DIR)"
+	cp "$(APP_ICON)" "$@"
 
 clean:
 	rm -rf "$(BUILD_DIR)"

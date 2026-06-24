@@ -1,6 +1,7 @@
 #include "hitbox_bridge_core.h"
 
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,11 +12,13 @@ typedef struct {
     int seconds;
 } Options;
 
-static HitboxBridge *g_bridge = NULL;
+_Static_assert(ATOMIC_POINTER_LOCK_FREE == 2, "bridge pointer must be lock-free for signal handling");
+
+static _Atomic(HitboxBridge *) g_bridge = NULL;
 
 static void handle_signal(int sig) {
     (void)sig;
-    hitbox_bridge_request_stop(g_bridge);
+    hitbox_bridge_request_stop(atomic_load_explicit(&g_bridge, memory_order_acquire));
 }
 
 static void event_cb(void *context, const char *control, bool down) {
@@ -49,17 +52,18 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
 
     Options opts = parse_args(argc, argv);
-    g_bridge = hitbox_bridge_create(event_cb, log_cb, NULL);
-    if (!g_bridge) {
+    HitboxBridge *bridge = hitbox_bridge_create(event_cb, log_cb, NULL, NULL);
+    if (!bridge) {
         fprintf(stderr, "failed to create bridge\n");
         return 1;
     }
+    atomic_store_explicit(&g_bridge, bridge, memory_order_release);
 
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
 
-    int result = hitbox_bridge_run(g_bridge, opts.forever, opts.seconds);
-    hitbox_bridge_destroy(g_bridge);
-    g_bridge = NULL;
+    int result = hitbox_bridge_run(bridge, opts.forever, opts.seconds);
+    atomic_store_explicit(&g_bridge, NULL, memory_order_release);
+    hitbox_bridge_destroy(bridge);
     return result;
 }

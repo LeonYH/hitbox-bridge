@@ -10,6 +10,8 @@
     <string>HitboxBridgeApp</string>
     <key>CFBundleIdentifier</key>
     <string>com.local.hitboxbridge</string>
+    <key>CFBundleIconFile</key>
+    <string>EightBitDoAppIcon.icns</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -19,7 +21,7 @@
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>4</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>

@@ -2,6 +2,53 @@ import AppKit
 import ApplicationServices
 import SwiftUI
 
+private enum WindowMetrics {
+    static let width: CGFloat = 820
+    static let minimumWidth: CGFloat = 760
+    static let compactHeight: CGFloat = 540
+    static let logHeight: CGFloat = 720
+}
+
+private enum StatusKind {
+    case running
+    case pending
+    case error
+    case idle
+}
+
+private enum BridgeStatus {
+    case stopped
+    case starting
+    case running
+    case stopping
+    case reconnecting(Double)
+    case accessibilityNeeded
+    case saveFailed
+    case unavailable
+
+    var text: String {
+        switch self {
+        case .stopped: return "Stopped"
+        case .starting: return "Starting"
+        case .running: return "Running"
+        case .stopping: return "Stopping"
+        case .reconnecting(let delay): return "Reconnecting in \(String(format: "%.1f", delay))s"
+        case .accessibilityNeeded: return "Accessibility needed"
+        case .saveFailed: return "Save failed"
+        case .unavailable: return "Bridge unavailable"
+        }
+    }
+
+    var kind: StatusKind {
+        switch self {
+        case .running: return .running
+        case .starting, .stopping, .reconnecting: return .pending
+        case .accessibilityNeeded, .saveFailed, .unavailable: return .error
+        case .stopped: return .idle
+        }
+    }
+}
+
 struct ControlMapping: Identifiable, Equatable {
     let id = UUID()
     let control: String
@@ -93,11 +140,52 @@ private final class InputEngine {
 
 private final class BridgeCallbackContext {
     let engine: InputEngine
-    var logHandler: ((String) -> Void)?
-    var eventLogHandler: ((String) -> Void)?
+    private let lock = NSLock()
+    private var logHandler: ((String) -> Void)?
+    private var eventLogHandler: ((String) -> Void)?
+    private var connectionHandler: ((Bool) -> Void)?
 
     init(engine: InputEngine) {
         self.engine = engine
+    }
+
+    func setLogHandler(_ handler: ((String) -> Void)?) {
+        lock.lock()
+        logHandler = handler
+        lock.unlock()
+    }
+
+    func setEventLogHandler(_ handler: ((String) -> Void)?) {
+        lock.lock()
+        eventLogHandler = handler
+        lock.unlock()
+    }
+
+    func setConnectionHandler(_ handler: ((Bool) -> Void)?) {
+        lock.lock()
+        connectionHandler = handler
+        lock.unlock()
+    }
+
+    func emitLog(_ message: String) {
+        lock.lock()
+        let handler = logHandler
+        lock.unlock()
+        handler?(message)
+    }
+
+    func emitEventLog(_ message: String) {
+        lock.lock()
+        let handler = eventLogHandler
+        lock.unlock()
+        handler?(message)
+    }
+
+    func emitConnection(_ connected: Bool) {
+        lock.lock()
+        let handler = connectionHandler
+        lock.unlock()
+        handler?(connected)
     }
 }
 
@@ -108,21 +196,28 @@ private func bridgeEventCallback(_ context: UnsafeMutableRawPointer?,
     let callbackContext = Unmanaged<BridgeCallbackContext>.fromOpaque(context).takeUnretainedValue()
     let controlName = String(cString: control)
     callbackContext.engine.handle(control: controlName, down: down)
-    callbackContext.eventLogHandler?("\(controlName) \(down ? "down" : "up")\n")
+    callbackContext.emitEventLog("\(controlName) \(down ? "down" : "up")\n")
 }
 
 private func bridgeLogCallback(_ context: UnsafeMutableRawPointer?,
                                _ message: UnsafePointer<CChar>?) {
     guard let context, let message else { return }
     let callbackContext = Unmanaged<BridgeCallbackContext>.fromOpaque(context).takeUnretainedValue()
-    callbackContext.logHandler?(String(cString: message))
+    callbackContext.emitLog(String(cString: message))
+}
+
+private func bridgeConnectionCallback(_ context: UnsafeMutableRawPointer?,
+                                      _ connected: Bool) {
+    guard let context else { return }
+    let callbackContext = Unmanaged<BridgeCallbackContext>.fromOpaque(context).takeUnretainedValue()
+    callbackContext.emitConnection(connected)
 }
 
 @MainActor
 final class BridgeModel: ObservableObject {
     @Published var isRunning = false
-    @Published var bridgeRunning = false
-    @Published var statusText = "Stopped"
+    @Published var devicePresent = false
+    @Published fileprivate var bridgeStatus: BridgeStatus = .stopped
     @Published var mappings: [ControlMapping]
     @Published var logText = ""
     @Published var recordingControl: String?
@@ -148,18 +243,6 @@ final class BridgeModel: ObservableObject {
         ("RSB", "H"),
     ]
 
-    private let keyCodes: [String: CGKeyCode] = [
-        "A": 0, "S": 1, "D": 2, "F": 3, "H": 4, "G": 5,
-        "Z": 6, "X": 7, "C": 8, "V": 9, "B": 11,
-        "Q": 12, "W": 13, "E": 14, "R": 15, "Y": 16, "T": 17,
-        "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23,
-        "=": 24, "9": 25, "7": 26, "-": 27, "8": 28, "0": 29,
-        "]": 30, "O": 31, "U": 32, "[": 33, "I": 34, "P": 35,
-        "ENTER": 36, "L": 37, "J": 38, "'": 39, "K": 40, ";": 41,
-        "\\": 42, ",": 43, "/": 44, "N": 45, "M": 46, ".": 47,
-        "TAB": 48, "SPACE": 49, "`": 50, "ESC": 53,
-    ]
-
     private let recordableKeyLabels: [UInt16: String] = [
         0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G",
         6: "Z", 7: "X", 8: "C", 9: "V", 11: "B",
@@ -171,11 +254,17 @@ final class BridgeModel: ObservableObject {
         42: "\\", 43: ",", 44: "/", 45: "N", 46: "M", 47: ".",
         49: "SPACE", 50: "`",
     ]
+    private lazy var keyCodes: [String: CGKeyCode] = Dictionary(
+        uniqueKeysWithValues: recordableKeyLabels.map { ($0.value, CGKeyCode($0.key)) }
+    )
 
     private let inputEngine = InputEngine()
     private lazy var callbackContext = BridgeCallbackContext(engine: inputEngine)
     private let bridgeQueue = DispatchQueue(label: "com.local.hitboxbridge.usb", qos: .userInteractive)
+    private let deviceMonitorQueue = DispatchQueue(label: "com.local.hitboxbridge.device-monitor", qos: .utility)
     private var bridge: OpaquePointer?
+    private var bridgeRunning = false
+    private var deviceMonitor: DispatchSourceTimer?
     private var keyMonitor: Any?
     private var reconnectWorkItem: DispatchWorkItem?
     private var accessibilityWorkItem: DispatchWorkItem?
@@ -198,12 +287,12 @@ final class BridgeModel: ObservableObject {
     }
 
     var deviceStatusText: String {
-        if bridgeRunning { return "Connected" }
-        return isRunning ? "Searching" : "Idle"
+        devicePresent ? "Connected" : "Disconnected"
     }
 
     func setBridgeEnabled(_ enabled: Bool) {
         if enabled {
+            recordingControl = nil
             isRunning = true
             reconnectAttempt = 0
             cancelReconnect()
@@ -218,15 +307,18 @@ final class BridgeModel: ObservableObject {
 
     @discardableResult
     func applyMappings() -> Bool {
+        guard !isRunning else { return false }
+
         do {
             refreshControlKeyCodes()
             try saveMappings()
             inputEngine.releasePressedKeys()
+            bridgeStatus = .stopped
             appendLog("Saved keymap: \(configURL.path)\n")
             showMappingFeedback("Saved")
             return true
         } catch {
-            statusText = "Save failed"
+            bridgeStatus = .saveFailed
             showMappingFeedback("Save failed", isError: true, autoClear: false)
             appendLog("Save failed: \(error.localizedDescription)\n")
             return false
@@ -234,6 +326,8 @@ final class BridgeModel: ObservableObject {
     }
 
     func resetDefaults() {
+        guard !isRunning else { return }
+
         mappings = defaults.map { ControlMapping(control: $0.0, key: $0.1) }
         if applyMappings() {
             showMappingFeedback("Defaults restored")
@@ -241,8 +335,11 @@ final class BridgeModel: ObservableObject {
     }
 
     func setLogsEnabled(_ enabled: Bool) {
+        guard logsEnabled != enabled else { return }
+
         logsEnabled = enabled
         refreshEventLogHandler()
+        resizeWindowForLogs(enabled)
         if enabled {
             appendLog("Log enabled.\n")
         } else {
@@ -251,8 +348,14 @@ final class BridgeModel: ObservableObject {
     }
 
     func beginRecording(control: String) {
+        guard !isRunning else { return }
+
         recordingControl = control
         appendLog("Recording \(control). Press a letter, number, punctuation key, or Space.\n")
+    }
+
+    func quitApplication() {
+        NSApp.terminate(nil)
     }
 
     func installKeyMonitor() {
@@ -264,13 +367,28 @@ final class BridgeModel: ObservableObject {
         }
     }
 
+    func startDeviceMonitoring() {
+        guard deviceMonitor == nil else { return }
+
+        let timer = DispatchSource.makeTimerSource(queue: deviceMonitorQueue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(750), leeway: .milliseconds(100))
+        timer.setEventHandler { [weak self] in
+            let present = hitbox_bridge_device_present()
+            Task { @MainActor in
+                self?.devicePresent = present
+            }
+        }
+        deviceMonitor = timer
+        timer.resume()
+    }
+
     func openAccessibilitySettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else {
             return
         }
         refreshAccessibilityStatus()
         if isRunning && !accessibilityTrusted {
-            statusText = "Accessibility needed"
+            bridgeStatus = .accessibilityNeeded
             scheduleAccessibilityPolling()
         }
         NSWorkspace.shared.open(url)
@@ -289,6 +407,8 @@ final class BridgeModel: ObservableObject {
         cancelReconnect()
         cancelAccessibilityPolling()
         cancelMappingFeedbackClear()
+        deviceMonitor?.cancel()
+        deviceMonitor = nil
         stopBridge()
     }
 
@@ -298,7 +418,7 @@ final class BridgeModel: ObservableObject {
 
         guard ensureAccessibilityPermission() else {
             bridgeRunning = false
-            statusText = "Accessibility needed"
+            bridgeStatus = .accessibilityNeeded
             appendLog("Accessibility permission is required for the app before enabling the bridge.\n")
             scheduleAccessibilityPolling()
             return
@@ -310,24 +430,33 @@ final class BridgeModel: ObservableObject {
         } catch {
             isRunning = false
             bridgeRunning = false
-            statusText = "Save failed"
+            bridgeStatus = .saveFailed
             appendLog("Save failed: \(error.localizedDescription)\n")
             return
         }
 
-        callbackContext.logHandler = { [weak self] message in
+        callbackContext.setLogHandler { [weak self] message in
             Task { @MainActor in
                 self?.appendLog(message)
+            }
+        }
+        callbackContext.setConnectionHandler { [weak self] connected in
+            Task { @MainActor in
+                guard let self else { return }
+                if connected && self.isRunning {
+                    self.bridgeStatus = .running
+                }
             }
         }
         refreshEventLogHandler()
 
         guard let nextBridge = hitbox_bridge_create(bridgeEventCallback,
                                                     bridgeLogCallback,
+                                                    bridgeConnectionCallback,
                                                     Unmanaged.passUnretained(callbackContext).toOpaque()) else {
             isRunning = false
             bridgeRunning = false
-            statusText = "Bridge unavailable"
+            bridgeStatus = .unavailable
             appendLog("Cannot create embedded USB bridge.\n")
             return
         }
@@ -336,7 +465,7 @@ final class BridgeModel: ObservableObject {
         bridge = nextBridge
         bridgeRunning = true
         bridgeStartTime = Date()
-        statusText = "Running"
+        bridgeStatus = .starting
 
         let bridgeAddress = UInt(bitPattern: nextBridge)
         bridgeQueue.async { [weak self, bridgeAddress] in
@@ -359,11 +488,11 @@ final class BridgeModel: ObservableObject {
 
         guard let bridge else {
             bridgeRunning = false
-            statusText = "Stopped"
+            bridgeStatus = .stopped
             return
         }
 
-        statusText = "Stopping"
+        bridgeStatus = .stopping
         hitbox_bridge_stop(bridge)
     }
 
@@ -385,7 +514,7 @@ final class BridgeModel: ObservableObject {
             return
         }
 
-        statusText = "Stopped"
+        bridgeStatus = .stopped
         appendLog("Embedded bridge exited with status \(status).\n")
     }
 
@@ -428,7 +557,7 @@ final class BridgeModel: ObservableObject {
     private func scheduleReconnect() {
         guard isRunning else { return }
         guard accessibilityTrusted else {
-            statusText = "Accessibility needed"
+            bridgeStatus = .accessibilityNeeded
             scheduleAccessibilityPolling()
             return
         }
@@ -436,7 +565,7 @@ final class BridgeModel: ObservableObject {
         cancelReconnect()
         let delay = min(5.0, 0.5 * pow(2.0, Double(reconnectAttempt)))
         reconnectAttempt += 1
-        statusText = "Reconnecting in \(String(format: "%.1f", delay))s"
+        bridgeStatus = .reconnecting(delay)
 
         let workItem = DispatchWorkItem { [weak self] in
             Task { @MainActor in
@@ -551,13 +680,13 @@ final class BridgeModel: ObservableObject {
 
     private func refreshEventLogHandler() {
         if logsEnabled {
-            callbackContext.eventLogHandler = { [weak self] message in
+            callbackContext.setEventLogHandler { [weak self] message in
                 Task { @MainActor in
                     self?.appendLog(message)
                 }
             }
         } else {
-            callbackContext.eventLogHandler = nil
+            callbackContext.setEventLogHandler(nil)
         }
     }
 
@@ -583,6 +712,41 @@ final class BridgeModel: ObservableObject {
         mappingFeedbackWorkItem?.cancel()
         mappingFeedbackWorkItem = nil
     }
+
+    private func resizeWindowForLogs(_ enabled: Bool) {
+        let targetContentHeight = enabled ? WindowMetrics.logHeight : WindowMetrics.compactHeight
+
+        DispatchQueue.main.async {
+            guard let window = NSApp.keyWindow ?? NSApp.windows.first else { return }
+
+            let currentFrame = window.frame
+            let currentContentRect = window.contentRect(forFrameRect: currentFrame)
+            var targetContentRect = currentContentRect
+            targetContentRect.size.height = targetContentHeight
+
+            var targetFrame = window.frameRect(forContentRect: targetContentRect)
+            targetFrame.origin.x = currentFrame.origin.x
+            targetFrame.origin.y = currentFrame.maxY - targetFrame.height
+
+            if let visibleFrame = window.screen?.visibleFrame {
+                targetFrame.origin.y = max(visibleFrame.minY, targetFrame.origin.y)
+                targetFrame.origin.x = min(
+                    max(visibleFrame.minX, targetFrame.origin.x),
+                    visibleFrame.maxX - targetFrame.width
+                )
+            }
+
+            window.contentMinSize = NSSize(
+                width: WindowMetrics.minimumWidth,
+                height: targetContentHeight
+            )
+
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                window.animator().setFrame(targetFrame, display: true)
+            }
+        }
+    }
 }
 
 struct ContentView: View {
@@ -595,14 +759,14 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     TopAppBar()
-                    StatusPanel()
                     KeyMappingPanel()
                     LogPanel()
                 }
                 .padding(20)
             }
         }
-        .frame(minWidth: 760, minHeight: 560)
+        .frame(minWidth: WindowMetrics.minimumWidth, minHeight: WindowMetrics.compactHeight)
+        .tint(MaterialTheme.primary)
         .onAppear {
             model.refreshAccessibilityStatus()
         }
@@ -610,21 +774,31 @@ struct ContentView: View {
 }
 
 private enum MaterialTheme {
-    static let background = Color(red: 0.965, green: 0.976, blue: 0.992)
-    static let surface = Color.white
-    static let surfaceVariant = Color(red: 0.925, green: 0.944, blue: 0.972)
-    static let primary = Color(red: 0.075, green: 0.305, blue: 0.760)
-    static let primaryContainer = Color(red: 0.855, green: 0.902, blue: 1.0)
-    static let outline = Color(red: 0.760, green: 0.790, blue: 0.835)
-    static let text = Color(red: 0.075, green: 0.090, blue: 0.125)
-    static let secondaryText = Color(red: 0.325, green: 0.365, blue: 0.430)
-    static let green = Color(red: 0.055, green: 0.500, blue: 0.250)
-    static let greenContainer = Color(red: 0.820, green: 0.945, blue: 0.870)
-    static let orange = Color(red: 0.705, green: 0.365, blue: 0.030)
-    static let orangeContainer = Color(red: 1.0, green: 0.900, blue: 0.760)
-    static let red = Color(red: 0.700, green: 0.075, blue: 0.085)
-    static let redContainer = Color(red: 1.0, green: 0.860, blue: 0.850)
-    static let neutralContainer = Color(red: 0.900, green: 0.920, blue: 0.950)
+    static let background = Color(red: 0.949, green: 0.945, blue: 0.929)
+    static let surface = Color(red: 0.988, green: 0.984, blue: 0.969)
+    static let surfaceVariant = Color(red: 0.918, green: 0.910, blue: 0.886)
+    static let logSurface = Color(red: 0.965, green: 0.957, blue: 0.937)
+
+    static let primary = Color(red: 0.286, green: 0.427, blue: 0.561)
+    static let primaryContainer = Color(red: 0.812, green: 0.871, blue: 0.914)
+    static let outline = Color(red: 0.745, green: 0.733, blue: 0.698)
+    static let text = Color(red: 0.165, green: 0.169, blue: 0.173)
+    static let secondaryText = Color(red: 0.405, green: 0.410, blue: 0.402)
+
+    static let direction = Color(red: 0.302, green: 0.502, blue: 0.396)
+    static let directionContainer = Color(red: 0.820, green: 0.890, blue: 0.847)
+    static let attack = Color(red: 0.651, green: 0.365, blue: 0.424)
+    static let attackContainer = Color(red: 0.918, green: 0.804, blue: 0.831)
+    static let function = Color(red: 0.420, green: 0.435, blue: 0.459)
+    static let functionContainer = Color(red: 0.855, green: 0.859, blue: 0.871)
+
+    static let green = Color(red: 0.271, green: 0.475, blue: 0.353)
+    static let greenContainer = Color(red: 0.812, green: 0.890, blue: 0.839)
+    static let orange = Color(red: 0.635, green: 0.404, blue: 0.196)
+    static let orangeContainer = Color(red: 0.933, green: 0.843, blue: 0.745)
+    static let red = Color(red: 0.647, green: 0.318, blue: 0.337)
+    static let redContainer = Color(red: 0.933, green: 0.812, blue: 0.812)
+    static let neutralContainer = Color(red: 0.890, green: 0.882, blue: 0.859)
 }
 
 private struct MaterialSurface<Content: View>: View {
@@ -641,8 +815,9 @@ private struct MaterialSurface<Content: View>: View {
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(MaterialTheme.outline.opacity(0.8), lineWidth: 1)
+                    .stroke(MaterialTheme.outline.opacity(0.72), lineWidth: 1)
             )
+            .shadow(color: MaterialTheme.text.opacity(0.035), radius: 3, x: 0, y: 1)
     }
 }
 
@@ -651,13 +826,11 @@ private struct TopAppBar: View {
 
     var body: some View {
         MaterialSurface {
-            HStack(spacing: 16) {
-                Image(systemName: "gamecontroller.fill")
-                    .font(.system(size: 28, weight: .semibold))
-                    .foregroundStyle(MaterialTheme.primary)
+            HStack(spacing: 14) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .interpolation(.high)
                     .frame(width: 44, height: 44)
-                    .background(MaterialTheme.primaryContainer)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("8BitDo Hitbox Bridge")
@@ -670,13 +843,16 @@ private struct TopAppBar: View {
 
                 Spacer(minLength: 20)
 
-                StatusBadge(text: model.statusText, kind: statusKind)
+                DeviceStatusBadge(value: model.deviceStatusText, kind: deviceStatusKind)
+                BridgeStatusIndicator(text: model.bridgeStatus.text, kind: model.bridgeStatus.kind)
 
                 Toggle("Enabled", isOn: Binding(
                     get: { model.isRunning },
                     set: { model.setBridgeEnabled($0) }
                 ))
                 .toggleStyle(.switch)
+                .labelsHidden()
+                .help("Enable bridge")
 
                 if !model.accessibilityTrusted {
                     Button {
@@ -688,56 +864,55 @@ private struct TopAppBar: View {
                     .buttonStyle(.plain)
                     .help("Accessibility permission is needed before the bridge can run.")
                 }
-            }
-        }
-    }
 
-    private var statusKind: StatusBadge.Kind {
-        if model.bridgeRunning { return .running }
-        if model.statusText.localizedCaseInsensitiveContains("accessibility") { return .error }
-        return model.isRunning ? .pending : .idle
-    }
-}
-
-private struct StatusPanel: View {
-    @EnvironmentObject private var model: BridgeModel
-
-    var body: some View {
-        HStack(spacing: 12) {
-            StatusMetric(title: "Device", value: model.deviceStatusText, systemImage: "gamecontroller")
-        }
-    }
-}
-
-private struct StatusMetric: View {
-    let title: String
-    let value: String
-    let systemImage: String
-
-    var body: some View {
-        MaterialSurface {
-            HStack(spacing: 10) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(MaterialTheme.primary)
-                    .frame(width: 32, height: 32)
-                    .background(MaterialTheme.primaryContainer.opacity(0.75))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(MaterialTheme.secondaryText)
-                    Text(value)
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(MaterialTheme.text)
-                        .lineLimit(1)
+                Button {
+                    model.quitApplication()
+                } label: {
+                    Image(systemName: "power")
                 }
-
-                Spacer(minLength: 0)
+                .buttonStyle(QuitButtonStyle())
+                .help("Quit 8BitDo Hitbox Bridge")
             }
         }
-        .frame(maxWidth: .infinity)
+    }
+
+    private var deviceStatusKind: StatusKind {
+        model.devicePresent ? .running : .idle
+    }
+}
+
+private struct DeviceStatusBadge: View {
+    let value: String
+    let kind: StatusKind
+
+    var body: some View {
+        Text(value)
+            .font(.callout.weight(.semibold))
+            .foregroundStyle(foreground)
+            .lineLimit(1)
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+        .background(background)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .help("Device: \(value)")
+    }
+
+    private var foreground: Color {
+        switch kind {
+        case .running: return MaterialTheme.green
+        case .pending: return MaterialTheme.orange
+        case .error: return MaterialTheme.red
+        case .idle: return MaterialTheme.secondaryText
+        }
+    }
+
+    private var background: Color {
+        switch kind {
+        case .running: return MaterialTheme.greenContainer
+        case .pending: return MaterialTheme.orangeContainer
+        case .error: return MaterialTheme.redContainer
+        case .idle: return MaterialTheme.neutralContainer
+        }
     }
 }
 
@@ -785,10 +960,11 @@ private struct KeyMappingPanel: View {
                     .frame(maxWidth: .infinity)
                 }
                 .padding(16)
-                .background(MaterialTheme.surfaceVariant.opacity(0.45))
+                .background(MaterialTheme.surfaceVariant.opacity(0.58))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
+        .disabled(model.isRunning)
     }
 }
 
@@ -813,11 +989,11 @@ private struct DirectionCluster: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            HitboxButton(mapping: mapping("UP"), size: .large)
+            HitboxButton(mapping: mapping("UP"), size: .large, role: .direction)
             HStack(spacing: 10) {
-                HitboxButton(mapping: mapping("LEFT"), size: .large)
-                HitboxButton(mapping: mapping("DOWN"), size: .large)
-                HitboxButton(mapping: mapping("RIGHT"), size: .large)
+                HitboxButton(mapping: mapping("LEFT"), size: .large, role: .direction)
+                HitboxButton(mapping: mapping("DOWN"), size: .large, role: .direction)
+                HitboxButton(mapping: mapping("RIGHT"), size: .large, role: .direction)
             }
         }
         .frame(maxWidth: .infinity)
@@ -841,7 +1017,7 @@ private struct AttackGrid: View {
             ForEach(rows, id: \.self) { row in
                 HStack(spacing: 12) {
                     ForEach(row, id: \.self) { control in
-                        HitboxButton(mapping: mapping(control), size: .medium)
+                        HitboxButton(mapping: mapping(control), size: .medium, role: .attack)
                     }
                 }
             }
@@ -859,8 +1035,8 @@ private struct FunctionRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Spacer(minLength: 0)
-            HitboxButton(mapping: mapping("LSB"), size: .small)
-            HitboxButton(mapping: mapping("RSB"), size: .small)
+            HitboxButton(mapping: mapping("LSB"), size: .small, role: .function)
+            HitboxButton(mapping: mapping("RSB"), size: .small, role: .function)
             Spacer(minLength: 0)
         }
     }
@@ -877,9 +1053,32 @@ private struct HitboxButton: View {
         case small
     }
 
+    enum Role {
+        case direction
+        case attack
+        case function
+
+        var foreground: Color {
+            switch self {
+            case .direction: return MaterialTheme.direction
+            case .attack: return MaterialTheme.attack
+            case .function: return MaterialTheme.function
+            }
+        }
+
+        var container: Color {
+            switch self {
+            case .direction: return MaterialTheme.directionContainer
+            case .attack: return MaterialTheme.attackContainer
+            case .function: return MaterialTheme.functionContainer
+            }
+        }
+    }
+
     @EnvironmentObject private var model: BridgeModel
     let mapping: ControlMapping
     let size: Size
+    let role: Role
 
     private var isRecording: Bool {
         model.recordingControl == mapping.control
@@ -917,14 +1116,19 @@ private struct HitboxButton: View {
             VStack(spacing: 3) {
                 Text(mapping.control)
                     .font(labelFont)
-                    .foregroundStyle(isRecording ? MaterialTheme.primary : MaterialTheme.secondaryText)
+                    .foregroundStyle(isRecording ? MaterialTheme.primary : role.foreground)
                 Text(keyText)
                     .font(keyFont)
                     .foregroundStyle(isRecording ? MaterialTheme.primary : MaterialTheme.text)
             }
             .frame(width: dimension, height: dimension)
         }
-        .buttonStyle(HitboxButtonStyle(active: isRecording, dimension: dimension))
+        .buttonStyle(HitboxButtonStyle(
+            active: isRecording,
+            dimension: dimension,
+            roleColor: role.foreground,
+            roleContainer: role.container
+        ))
     }
 }
 
@@ -974,7 +1178,7 @@ private struct LogPanel: View {
                         }
                     }
                     .frame(minHeight: 130)
-                    .background(Color(red: 0.982, green: 0.986, blue: 0.994))
+                    .background(MaterialTheme.logSurface)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .overlay(
                         RoundedRectangle(cornerRadius: 8)
@@ -986,28 +1190,23 @@ private struct LogPanel: View {
     }
 }
 
-private struct StatusBadge: View {
-    enum Kind {
-        case running
-        case pending
-        case error
-        case idle
-    }
-
+private struct BridgeStatusIndicator: View {
     let text: String
-    let kind: Kind
+    let kind: StatusKind
 
     var body: some View {
-        Text(text)
-            .font(.callout.weight(.semibold))
-            .foregroundStyle(foreground)
-            .padding(.horizontal, 12)
-            .frame(height: 30)
-            .background(background)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+        Circle()
+            .fill(color)
+            .frame(width: 11, height: 11)
+            .padding(9)
+            .background(color.opacity(0.14))
+            .clipShape(Circle())
+            .shadow(color: color.opacity(kind == .idle ? 0 : 0.32), radius: 4)
+            .help("Bridge: \(text)")
+            .accessibilityLabel("Bridge status: \(text)")
     }
 
-    private var foreground: Color {
+    private var color: Color {
         switch kind {
         case .running: return MaterialTheme.green
         case .pending: return MaterialTheme.orange
@@ -1015,48 +1214,53 @@ private struct StatusBadge: View {
         case .idle: return MaterialTheme.secondaryText
         }
     }
-
-    private var background: Color {
-        switch kind {
-        case .running: return MaterialTheme.greenContainer
-        case .pending: return MaterialTheme.orangeContainer
-        case .error: return MaterialTheme.redContainer
-        case .idle: return MaterialTheme.neutralContainer
-        }
-    }
 }
 
 private struct FilledMaterialButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.callout.weight(.semibold))
-            .foregroundStyle(Color.white)
+            .foregroundStyle(isEnabled ? Color.white : MaterialTheme.secondaryText)
             .padding(.horizontal, 13)
             .frame(height: 32)
-            .background(MaterialTheme.primary.opacity(configuration.isPressed ? 0.82 : 1.0))
+            .background(background(configuration: configuration))
             .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func background(configuration: Configuration) -> Color {
+        guard isEnabled else { return MaterialTheme.neutralContainer }
+        return MaterialTheme.primary.opacity(configuration.isPressed ? 0.82 : 1.0)
     }
 }
 
 private struct OutlinedMaterialButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.callout.weight(.semibold))
-            .foregroundStyle(MaterialTheme.primary)
+            .foregroundStyle(isEnabled ? MaterialTheme.primary : MaterialTheme.secondaryText)
             .padding(.horizontal, 12)
             .frame(height: 32)
             .background(MaterialTheme.surface.opacity(configuration.isPressed ? 0.55 : 1.0))
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(MaterialTheme.outline, lineWidth: 1)
+                    .stroke(isEnabled ? MaterialTheme.outline : MaterialTheme.outline.opacity(0.55),
+                            lineWidth: 1)
             )
     }
 }
 
 private struct HitboxButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
     let active: Bool
     let dimension: CGFloat
+    let roleColor: Color
+    let roleContainer: Color
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -1065,23 +1269,56 @@ private struct HitboxButtonStyle: ButtonStyle {
             .clipShape(Circle())
             .overlay(
                 Circle()
-                    .stroke(active ? MaterialTheme.primary : MaterialTheme.outline.opacity(0.85), lineWidth: active ? 2 : 1)
+                    .stroke(active ? MaterialTheme.primary : roleColor.opacity(0.52),
+                            lineWidth: active ? 2 : 1)
             )
-            .shadow(color: Color.black.opacity(active ? 0.14 : 0.08),
-                    radius: active ? 8 : 4,
+            .shadow(color: MaterialTheme.text.opacity(active ? 0.13 : 0.07),
+                    radius: isEnabled ? (active ? 7 : 3) : 0,
                     x: 0,
-                    y: active ? 4 : 2)
+                    y: active ? 3 : 1)
             .scaleEffect(configuration.isPressed ? 0.96 : 1.0)
+            .opacity(isEnabled ? 1.0 : 0.42)
     }
 
     private func background(isPressed: Bool) -> Color {
         if active { return MaterialTheme.primaryContainer }
-        return isPressed ? MaterialTheme.neutralContainer : MaterialTheme.surface
+        return isPressed ? roleContainer.opacity(0.78) : roleContainer.opacity(0.48)
+    }
+}
+
+private struct QuitButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(MaterialTheme.red)
+            .frame(width: 30, height: 30)
+            .background(MaterialTheme.redContainer.opacity(configuration.isPressed ? 1.0 : 0.72))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var model: BridgeModel?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if let iconURL = Bundle.main.url(forResource: "EightBitDoAppIcon", withExtension: "icns"),
+           let icon = NSImage(contentsOf: iconURL) {
+            NSApp.applicationIconImage = icon
+        }
+
+        DispatchQueue.main.async {
+            guard let window = NSApp.windows.first else { return }
+            window.contentMinSize = NSSize(
+                width: WindowMetrics.minimumWidth,
+                height: WindowMetrics.compactHeight
+            )
+            window.setContentSize(NSSize(
+                width: WindowMetrics.width,
+                height: WindowMetrics.compactHeight
+            ))
+            window.center()
+        }
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         model?.stopForAppQuit()
@@ -1100,8 +1337,10 @@ struct HitboxBridgeApp: App {
                 .onAppear {
                     appDelegate.model = model
                     model.installKeyMonitor()
+                    model.startDeviceMonitoring()
                 }
         }
         .windowStyle(.titleBar)
+        .defaultSize(width: WindowMetrics.width, height: WindowMetrics.compactHeight)
     }
 }
