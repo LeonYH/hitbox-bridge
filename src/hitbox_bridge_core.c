@@ -6,20 +6,22 @@
 #include <IOKit/usb/IOUSBLib.h>
 #include <IOKit/usb/USB.h>
 #include <mach/mach_error.h>
+#include <pthread.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <signal.h>
 #include <unistd.h>
 
 #define VENDOR_ID 0x2DC8
 #define PRODUCT_ID 0x202C
 
 typedef struct {
-    bool done;
+    atomic_int references;
+    atomic_bool done;
     IOReturn result;
     UInt32 size;
     uint8_t data[128];
@@ -37,21 +39,6 @@ typedef struct {
     uint8_t lo_index;
     bool is_down;
 } AxisBinding;
-
-enum {
-    BIT_BINDING_COUNT = 12,
-    AXIS_BINDING_COUNT = 2,
-};
-
-struct HitboxBridge {
-    HitboxBridgeEventCallback event_cb;
-    HitboxBridgeLogCallback log_cb;
-    void *context;
-    volatile sig_atomic_t stop_requested;
-    CFRunLoopRef run_loop;
-    BitBinding bit_bindings[BIT_BINDING_COUNT];
-    AxisBinding axis_bindings[AXIS_BINDING_COUNT];
-};
 
 static const BitBinding bit_binding_defaults[] = {
     {"UP",    5, 0x01, false},
@@ -74,6 +61,26 @@ static const AxisBinding axis_binding_defaults[] = {
     {"RT", 8, false},
 };
 
+enum {
+    BIT_BINDING_COUNT = sizeof(bit_binding_defaults) / sizeof(bit_binding_defaults[0]),
+    AXIS_BINDING_COUNT = sizeof(axis_binding_defaults) / sizeof(axis_binding_defaults[0]),
+};
+
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "stop flag must be lock-free for signal handling");
+
+struct HitboxBridge {
+    HitboxBridgeEventCallback event_cb;
+    HitboxBridgeLogCallback log_cb;
+    HitboxBridgeConnectionCallback connection_cb;
+    void *context;
+    atomic_int stop_requested;
+    pthread_mutex_t state_lock;
+    CFRunLoopRef run_loop;
+    bool connected;
+    BitBinding bit_bindings[BIT_BINDING_COUNT];
+    AxisBinding axis_bindings[AXIS_BINDING_COUNT];
+};
+
 static const char *ret_str(IOReturn err) {
     if (err == kIOReturnSuccess) return "ok";
     const char *s = mach_error_string(err);
@@ -92,7 +99,7 @@ static void bridge_log(HitboxBridge *bridge, const char *fmt, ...) {
 }
 
 static uint16_t le16(const uint8_t *p) {
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+    return (uint16_t)((uint16_t)p[0] | (uint16_t)((uint16_t)p[1] << 8));
 }
 
 static CFNumberRef cfnum_u16(uint16_t value) {
@@ -120,6 +127,35 @@ static void emit_event(HitboxBridge *bridge, const char *control, bool down) {
     if (bridge->event_cb) {
         bridge->event_cb(bridge->context, control, down);
     }
+}
+
+static void set_connected(HitboxBridge *bridge, bool connected) {
+    if (bridge->connected == connected) return;
+    bridge->connected = connected;
+    if (bridge->connection_cb) {
+        bridge->connection_cb(bridge->context, connected);
+    }
+}
+
+static bool stop_requested(const HitboxBridge *bridge) {
+    return atomic_load_explicit(&bridge->stop_requested, memory_order_acquire) != 0;
+}
+
+static void install_run_loop(HitboxBridge *bridge, CFRunLoopRef run_loop) {
+    if (run_loop) CFRetain(run_loop);
+
+    pthread_mutex_lock(&bridge->state_lock);
+    bridge->run_loop = run_loop;
+    pthread_mutex_unlock(&bridge->state_lock);
+}
+
+static void clear_run_loop(HitboxBridge *bridge) {
+    pthread_mutex_lock(&bridge->state_lock);
+    CFRunLoopRef run_loop = bridge->run_loop;
+    bridge->run_loop = NULL;
+    pthread_mutex_unlock(&bridge->state_lock);
+
+    if (run_loop) CFRelease(run_loop);
 }
 
 static void print_controls(HitboxBridge *bridge) {
@@ -225,6 +261,13 @@ static io_service_t find_device(void) {
     io_service_t service = IOIteratorNext(iterator);
     IOObjectRelease(iterator);
     return service;
+}
+
+bool hitbox_bridge_device_present(void) {
+    io_service_t service = find_device();
+    if (service == IO_OBJECT_NULL) return false;
+    IOObjectRelease(service);
+    return true;
 }
 
 static IOReturn configure_device(IOUSBDeviceInterface **dev) {
@@ -350,11 +393,22 @@ static void init_gip(HitboxBridge *bridge, IOUSBInterfaceInterface **intf, UInt8
     usleep(20000);
 }
 
+static void read_context_retain(ReadContext *ctx) {
+    atomic_fetch_add_explicit(&ctx->references, 1, memory_order_relaxed);
+}
+
+static void read_context_release(ReadContext *ctx) {
+    if (atomic_fetch_sub_explicit(&ctx->references, 1, memory_order_acq_rel) == 1) {
+        free(ctx);
+    }
+}
+
 static void read_cb(void *refcon, IOReturn result, void *arg0) {
     ReadContext *ctx = (ReadContext *)refcon;
     ctx->result = result;
     ctx->size = (UInt32)(uintptr_t)arg0;
-    ctx->done = true;
+    atomic_store_explicit(&ctx->done, true, memory_order_release);
+    read_context_release(ctx);
 }
 
 static bool update_binding(HitboxBridge *bridge, const char *name, bool old_down, bool new_down) {
@@ -381,21 +435,27 @@ static void handle_input_packet(HitboxBridge *bridge, const uint8_t *data, UInt3
 
 HitboxBridge *hitbox_bridge_create(HitboxBridgeEventCallback event_cb,
                                    HitboxBridgeLogCallback log_cb,
+                                   HitboxBridgeConnectionCallback connection_cb,
                                    void *context) {
     HitboxBridge *bridge = calloc(1, sizeof(*bridge));
     if (!bridge) return NULL;
 
     bridge->event_cb = event_cb;
     bridge->log_cb = log_cb;
+    bridge->connection_cb = connection_cb;
     bridge->context = context;
+    atomic_init(&bridge->stop_requested, 0);
+    if (pthread_mutex_init(&bridge->state_lock, NULL) != 0) {
+        free(bridge);
+        return NULL;
+    }
     reset_bindings(bridge);
     return bridge;
 }
 
 int hitbox_bridge_run(HitboxBridge *bridge, bool forever, int seconds) {
     if (!bridge) return 1;
-
-    bridge->stop_requested = 0;
+    if (stop_requested(bridge)) return 0;
     reset_bindings(bridge);
 
     io_service_t service = find_device();
@@ -437,8 +497,7 @@ int hitbox_bridge_run(HitboxBridge *bridge, bool forever, int seconds) {
         return 1;
     }
 
-    bridge->run_loop = CFRunLoopGetCurrent();
-    if (bridge->run_loop) CFRetain(bridge->run_loop);
+    install_run_loop(bridge, CFRunLoopGetCurrent());
     CFRunLoopAddSource(CFRunLoopGetCurrent(), async_source, kCFRunLoopDefaultMode);
 
     print_controls(bridge);
@@ -448,16 +507,30 @@ int hitbox_bridge_run(HitboxBridge *bridge, bool forever, int seconds) {
         bridge_log(bridge, "Decoding for %d seconds.\n", seconds);
     }
     init_gip(bridge, intf, out_pipe);
+    set_connected(bridge, true);
 
     int exit_code = 0;
     CFAbsoluteTime deadline = forever ? 0 : CFAbsoluteTimeGetCurrent() + seconds;
     bool pending = false;
-    ReadContext ctx = {0};
-    while (!bridge->stop_requested && (forever || CFAbsoluteTimeGetCurrent() < deadline)) {
+    ReadContext *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        bridge_log(bridge, "Cannot allocate USB read context\n");
+        exit_code = 1;
+        goto cleanup;
+    }
+    atomic_init(&ctx->references, 1);
+    atomic_init(&ctx->done, false);
+
+    while (!stop_requested(bridge) && (forever || CFAbsoluteTimeGetCurrent() < deadline)) {
         if (!pending) {
-            memset(&ctx, 0, sizeof(ctx));
-            kr = (*intf)->ReadPipeAsync(intf, in_pipe, ctx.data, sizeof(ctx.data), read_cb, &ctx);
+            ctx->result = kIOReturnSuccess;
+            ctx->size = 0;
+            memset(ctx->data, 0, sizeof(ctx->data));
+            atomic_store_explicit(&ctx->done, false, memory_order_release);
+            read_context_retain(ctx);
+            kr = (*intf)->ReadPipeAsync(intf, in_pipe, ctx->data, sizeof(ctx->data), read_cb, ctx);
             if (kr != kIOReturnSuccess) {
+                read_context_release(ctx);
                 bridge_log(bridge, "ReadPipeAsync: 0x%08x %s\n", kr, ret_str(kr));
                 exit_code = 1;
                 break;
@@ -466,11 +539,11 @@ int hitbox_bridge_run(HitboxBridge *bridge, bool forever, int seconds) {
         }
 
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, true);
-        if (pending && ctx.done) {
-            if (ctx.result == kIOReturnSuccess && ctx.size > 0) {
-                handle_input_packet(bridge, ctx.data, ctx.size);
-            } else if (ctx.result != kIOReturnSuccess && ctx.result != kIOReturnAborted) {
-                bridge_log(bridge, "ReadPipeAsync completion: 0x%08x %s\n", ctx.result, ret_str(ctx.result));
+        if (pending && atomic_load_explicit(&ctx->done, memory_order_acquire)) {
+            if (ctx->result == kIOReturnSuccess && ctx->size > 0) {
+                handle_input_packet(bridge, ctx->data, ctx->size);
+            } else if (ctx->result != kIOReturnSuccess && ctx->result != kIOReturnAborted) {
+                bridge_log(bridge, "ReadPipeAsync completion: 0x%08x %s\n", ctx->result, ret_str(ctx->result));
                 exit_code = 1;
                 pending = false;
                 break;
@@ -481,36 +554,52 @@ int hitbox_bridge_run(HitboxBridge *bridge, bool forever, int seconds) {
 
     if (pending) {
         (*intf)->AbortPipe(intf, in_pipe);
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, true);
+        CFAbsoluteTime abort_deadline = CFAbsoluteTimeGetCurrent() + 1.0;
+        while (!atomic_load_explicit(&ctx->done, memory_order_acquire) &&
+               CFAbsoluteTimeGetCurrent() < abort_deadline) {
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, true);
+        }
+        if (!atomic_load_explicit(&ctx->done, memory_order_acquire)) {
+            bridge_log(bridge, "USB read cancellation did not complete; retaining callback context\n");
+        }
     }
+    read_context_release(ctx);
 
+cleanup:
     CFRunLoopRemoveSource(CFRunLoopGetCurrent(), async_source, kCFRunLoopDefaultMode);
     CFRelease(async_source);
-    if (bridge->run_loop) {
-        CFRelease(bridge->run_loop);
-        bridge->run_loop = NULL;
-    }
+    clear_run_loop(bridge);
     (*intf)->USBInterfaceClose(intf);
     (*intf)->Release(intf);
     (*dev)->USBDeviceClose(dev);
     (*dev)->Release(dev);
+    set_connected(bridge, false);
     return exit_code;
 }
 
 void hitbox_bridge_request_stop(HitboxBridge *bridge) {
     if (bridge) {
-        bridge->stop_requested = 1;
+        atomic_store_explicit(&bridge->stop_requested, 1, memory_order_release);
     }
 }
 
 void hitbox_bridge_stop(HitboxBridge *bridge) {
     if (!bridge) return;
     hitbox_bridge_request_stop(bridge);
-    if (bridge->run_loop) {
-        CFRunLoopStop(bridge->run_loop);
+
+    pthread_mutex_lock(&bridge->state_lock);
+    CFRunLoopRef run_loop = bridge->run_loop;
+    if (run_loop) CFRetain(run_loop);
+    pthread_mutex_unlock(&bridge->state_lock);
+
+    if (run_loop) {
+        CFRunLoopStop(run_loop);
+        CFRelease(run_loop);
     }
 }
 
 void hitbox_bridge_destroy(HitboxBridge *bridge) {
+    if (!bridge) return;
+    pthread_mutex_destroy(&bridge->state_lock);
     free(bridge);
 }
