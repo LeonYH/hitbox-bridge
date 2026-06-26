@@ -3,10 +3,10 @@ import ApplicationServices
 import SwiftUI
 
 private enum WindowMetrics {
-    static let width: CGFloat = 820
-    static let minimumWidth: CGFloat = 760
-    static let compactHeight: CGFloat = 540
-    static let logHeight: CGFloat = 720
+    static let width: CGFloat = 880
+    static let minimumWidth: CGFloat = 820
+    static let compactHeight: CGFloat = 620
+    static let logHeight: CGFloat = 760
 }
 
 private enum StatusKind {
@@ -757,12 +757,15 @@ struct ContentView: View {
             MaterialTheme.background.ignoresSafeArea()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    TopAppBar()
+                VStack(alignment: .leading, spacing: 18) {
+                    StatusConsole()
+                    if !model.accessibilityTrusted {
+                        AccessibilityBanner()
+                    }
                     KeyMappingPanel()
                     LogPanel()
                 }
-                .padding(20)
+                .padding(22)
             }
         }
         .frame(minWidth: WindowMetrics.minimumWidth, minHeight: WindowMetrics.compactHeight)
@@ -774,31 +777,36 @@ struct ContentView: View {
 }
 
 private enum MaterialTheme {
-    static let background = Color(red: 0.949, green: 0.945, blue: 0.929)
-    static let surface = Color(red: 0.988, green: 0.984, blue: 0.969)
-    static let surfaceVariant = Color(red: 0.918, green: 0.910, blue: 0.886)
-    static let logSurface = Color(red: 0.965, green: 0.957, blue: 0.937)
+    static let background = Color(red: 0.933, green: 0.927, blue: 0.902)
+    static let surface = Color(red: 0.990, green: 0.985, blue: 0.963)
+    static let surfaceRaised = Color(red: 0.999, green: 0.996, blue: 0.984)
+    static let deckSurface = Color(red: 0.150, green: 0.158, blue: 0.165)
+    static let deckSurfaceRaised = Color(red: 0.210, green: 0.220, blue: 0.228)
+    static let logSurface = Color(red: 0.118, green: 0.125, blue: 0.130)
 
-    static let primary = Color(red: 0.286, green: 0.427, blue: 0.561)
-    static let primaryContainer = Color(red: 0.812, green: 0.871, blue: 0.914)
-    static let outline = Color(red: 0.745, green: 0.733, blue: 0.698)
-    static let text = Color(red: 0.165, green: 0.169, blue: 0.173)
-    static let secondaryText = Color(red: 0.405, green: 0.410, blue: 0.402)
+    static let primary = Color(red: 0.183, green: 0.385, blue: 0.563)
+    static let primaryContainer = Color(red: 0.765, green: 0.867, blue: 0.940)
+    static let outline = Color(red: 0.690, green: 0.671, blue: 0.612)
+    static let outlineStrong = Color(red: 0.455, green: 0.439, blue: 0.390)
+    static let text = Color(red: 0.145, green: 0.149, blue: 0.153)
+    static let secondaryText = Color(red: 0.395, green: 0.397, blue: 0.383)
+    static let inverseText = Color(red: 0.950, green: 0.955, blue: 0.952)
+    static let inverseSecondaryText = Color(red: 0.705, green: 0.735, blue: 0.735)
 
-    static let direction = Color(red: 0.302, green: 0.502, blue: 0.396)
-    static let directionContainer = Color(red: 0.820, green: 0.890, blue: 0.847)
-    static let attack = Color(red: 0.651, green: 0.365, blue: 0.424)
-    static let attackContainer = Color(red: 0.918, green: 0.804, blue: 0.831)
-    static let function = Color(red: 0.420, green: 0.435, blue: 0.459)
-    static let functionContainer = Color(red: 0.855, green: 0.859, blue: 0.871)
+    static let direction = Color(red: 0.220, green: 0.590, blue: 0.420)
+    static let directionContainer = Color(red: 0.690, green: 0.920, blue: 0.790)
+    static let attack = Color(red: 0.835, green: 0.275, blue: 0.335)
+    static let attackContainer = Color(red: 0.960, green: 0.720, blue: 0.765)
+    static let function = Color(red: 0.410, green: 0.500, blue: 0.625)
+    static let functionContainer = Color(red: 0.760, green: 0.815, blue: 0.900)
 
-    static let green = Color(red: 0.271, green: 0.475, blue: 0.353)
-    static let greenContainer = Color(red: 0.812, green: 0.890, blue: 0.839)
-    static let orange = Color(red: 0.635, green: 0.404, blue: 0.196)
-    static let orangeContainer = Color(red: 0.933, green: 0.843, blue: 0.745)
-    static let red = Color(red: 0.647, green: 0.318, blue: 0.337)
-    static let redContainer = Color(red: 0.933, green: 0.812, blue: 0.812)
-    static let neutralContainer = Color(red: 0.890, green: 0.882, blue: 0.859)
+    static let green = Color(red: 0.155, green: 0.550, blue: 0.335)
+    static let greenContainer = Color(red: 0.780, green: 0.925, blue: 0.830)
+    static let orange = Color(red: 0.765, green: 0.425, blue: 0.120)
+    static let orangeContainer = Color(red: 0.965, green: 0.830, blue: 0.610)
+    static let red = Color(red: 0.755, green: 0.245, blue: 0.285)
+    static let redContainer = Color(red: 0.955, green: 0.780, blue: 0.775)
+    static let neutralContainer = Color(red: 0.858, green: 0.850, blue: 0.812)
 }
 
 private struct MaterialSurface<Content: View>: View {
@@ -810,59 +818,61 @@ private struct MaterialSurface<Content: View>: View {
 
     var body: some View {
         content
-            .padding(16)
+            .padding(18)
             .background(MaterialTheme.surface)
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(MaterialTheme.outline.opacity(0.72), lineWidth: 1)
+                    .stroke(MaterialTheme.outline.opacity(0.78), lineWidth: 1)
             )
-            .shadow(color: MaterialTheme.text.opacity(0.035), radius: 3, x: 0, y: 1)
+            .shadow(color: MaterialTheme.text.opacity(0.075), radius: 8, x: 0, y: 3)
     }
 }
 
-private struct TopAppBar: View {
+private struct StatusConsole: View {
     @EnvironmentObject private var model: BridgeModel
 
     var body: some View {
-        MaterialSurface {
+        HStack(spacing: 20) {
             HStack(spacing: 14) {
-                Image(nsImage: NSApp.applicationIconImage)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 44, height: 44)
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("8BitDo Hitbox Bridge")
-                        .font(.title2.weight(.semibold))
-                        .foregroundStyle(MaterialTheme.text)
-                    Text("Arcade Controller for Xbox")
-                        .font(.callout)
-                        .foregroundStyle(MaterialTheme.secondaryText)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(MaterialTheme.surfaceRaised.opacity(0.13))
+                        .frame(width: 56, height: 56)
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 42, height: 42)
                 }
 
-                Spacer(minLength: 20)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("8BitDo Hitbox Bridge")
+                        .font(.title2.weight(.bold))
+                        .foregroundStyle(MaterialTheme.inverseText)
+                    Text("Arcade Controller for Xbox")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(MaterialTheme.inverseSecondaryText)
+                }
+            }
 
-                DeviceStatusBadge(value: model.deviceStatusText, kind: deviceStatusKind)
-                BridgeStatusIndicator(text: model.bridgeStatus.text, kind: model.bridgeStatus.kind)
+            Spacer(minLength: 12)
 
-                Toggle("Enabled", isOn: Binding(
-                    get: { model.isRunning },
-                    set: { model.setBridgeEnabled($0) }
-                ))
-                .toggleStyle(.switch)
-                .labelsHidden()
-                .help("Enable bridge")
+            HStack(spacing: 10) {
+                StatusReadout(title: "Device", value: model.deviceStatusText, kind: deviceStatusKind)
+                StatusReadout(title: "Bridge", value: model.bridgeStatus.text, kind: model.bridgeStatus.kind)
 
-                if !model.accessibilityTrusted {
-                    Button {
-                        model.openAccessibilitySettings()
-                    } label: {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(MaterialTheme.orange)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Accessibility permission is needed before the bridge can run.")
+                VStack(alignment: .trailing, spacing: 7) {
+                    Text("Bridge")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(MaterialTheme.inverseSecondaryText)
+                        .textCase(.uppercase)
+                    Toggle("Enabled", isOn: Binding(
+                        get: { model.isRunning },
+                        set: { model.setBridgeEnabled($0) }
+                    ))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .help("Enable bridge")
                 }
 
                 Button {
@@ -874,6 +884,14 @@ private struct TopAppBar: View {
                 .help("Quit 8BitDo Hitbox Bridge")
             }
         }
+        .padding(18)
+        .background(MaterialTheme.deckSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+        .shadow(color: MaterialTheme.text.opacity(0.18), radius: 12, x: 0, y: 6)
     }
 
     private var deviceStatusKind: StatusKind {
@@ -881,38 +899,84 @@ private struct TopAppBar: View {
     }
 }
 
-private struct DeviceStatusBadge: View {
+private struct StatusReadout: View {
+    let title: String
     let value: String
     let kind: StatusKind
 
     var body: some View {
-        Text(value)
-            .font(.callout.weight(.semibold))
-            .foregroundStyle(foreground)
-            .lineLimit(1)
-        .padding(.horizontal, 10)
-        .frame(height: 30)
-        .background(background)
+        HStack(spacing: 9) {
+            BridgeStatusIndicator(text: value, kind: kind)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(MaterialTheme.inverseSecondaryText)
+                    .textCase(.uppercase)
+                Text(value)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(MaterialTheme.inverseText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            }
+        }
+        .padding(.horizontal, 11)
+        .frame(height: 48)
+        .background(MaterialTheme.deckSurfaceRaised)
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .help("Device: \(value)")
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(statusColor.opacity(0.28), lineWidth: 1)
+        )
+        .help("\(title): \(value)")
     }
 
-    private var foreground: Color {
+    private var statusColor: Color {
         switch kind {
         case .running: return MaterialTheme.green
         case .pending: return MaterialTheme.orange
         case .error: return MaterialTheme.red
-        case .idle: return MaterialTheme.secondaryText
+        case .idle: return MaterialTheme.inverseSecondaryText
         }
     }
+}
 
-    private var background: Color {
-        switch kind {
-        case .running: return MaterialTheme.greenContainer
-        case .pending: return MaterialTheme.orangeContainer
-        case .error: return MaterialTheme.redContainer
-        case .idle: return MaterialTheme.neutralContainer
+private struct AccessibilityBanner: View {
+    @EnvironmentObject private var model: BridgeModel
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(MaterialTheme.orange)
+                .frame(width: 28, height: 28)
+                .background(MaterialTheme.orangeContainer)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Accessibility permission required")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(MaterialTheme.text)
+                Text("Keyboard output is blocked until this app is allowed in System Settings.")
+                    .font(.caption)
+                    .foregroundStyle(MaterialTheme.secondaryText)
+            }
+
+            Spacer()
+
+            Button {
+                model.openAccessibilitySettings()
+            } label: {
+                Label("Open Settings", systemImage: "switch.2")
+            }
+            .buttonStyle(OutlinedMaterialButtonStyle())
         }
+        .padding(14)
+        .background(MaterialTheme.orangeContainer.opacity(0.42))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(MaterialTheme.orange.opacity(0.45), lineWidth: 1)
+        )
     }
 }
 
@@ -922,10 +986,15 @@ private struct KeyMappingPanel: View {
     var body: some View {
         MaterialSurface {
             VStack(alignment: .leading, spacing: 16) {
-                HStack(spacing: 10) {
-                    Label("Key Mapping", systemImage: "keyboard")
-                        .font(.headline)
-                        .foregroundStyle(MaterialTheme.text)
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Label("Key Mapping", systemImage: "keyboard")
+                            .font(.headline)
+                            .foregroundStyle(MaterialTheme.text)
+                        Text(model.isRunning ? "Stop the bridge to edit mappings." : "Click a control, then press the replacement key.")
+                            .font(.caption)
+                            .foregroundStyle(MaterialTheme.secondaryText)
+                    }
                     Spacer()
                     Button {
                         model.resetDefaults()
@@ -943,28 +1012,73 @@ private struct KeyMappingPanel: View {
                     .keyboardShortcut(.defaultAction)
                 }
 
-                if !model.mappingFeedback.isEmpty {
+                if let recordingControl = model.recordingControl {
+                    RecordingBanner(control: recordingControl)
+                } else if !model.mappingFeedback.isEmpty {
                     MappingFeedbackView(text: model.mappingFeedback, isError: model.mappingFeedbackIsError)
                 }
 
-                HStack(alignment: .center, spacing: 20) {
-                    DirectionCluster()
-                        .frame(width: 230)
+                HStack(alignment: .center, spacing: 24) {
+                    VStack(alignment: .center, spacing: 12) {
+                        SectionCaption("Movement")
+                        DirectionCluster()
+                    }
+                    .frame(width: 250)
 
-                    Divider()
+                    Rectangle()
+                        .fill(Color.white.opacity(0.09))
+                        .frame(width: 1, height: 178)
 
-                    VStack(spacing: 14) {
+                    VStack(alignment: .center, spacing: 14) {
+                        SectionCaption("Action Buttons")
                         AttackGrid()
                         FunctionRow()
                     }
                     .frame(maxWidth: .infinity)
                 }
-                .padding(16)
-                .background(MaterialTheme.surfaceVariant.opacity(0.58))
+                .padding(20)
+                .background(MaterialTheme.deckSurface)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(MaterialTheme.outlineStrong.opacity(0.56), lineWidth: 1)
+                )
+                .shadow(color: MaterialTheme.text.opacity(0.12), radius: 9, x: 0, y: 4)
             }
         }
         .disabled(model.isRunning)
+    }
+}
+
+private struct SectionCaption: View {
+    let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.caption.weight(.bold))
+            .foregroundStyle(MaterialTheme.inverseSecondaryText)
+            .textCase(.uppercase)
+            .tracking(0.8)
+            .frame(maxWidth: .infinity)
+    }
+}
+
+private struct RecordingBanner: View {
+    let control: String
+
+    var body: some View {
+        Label("Recording \(control)", systemImage: "record.circle.fill")
+            .font(.callout.weight(.semibold))
+            .foregroundStyle(MaterialTheme.primary)
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            .background(MaterialTheme.primaryContainer)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .frame(maxWidth: .infinity, alignment: .trailing)
     }
 }
 
@@ -977,7 +1091,7 @@ private struct MappingFeedbackView: View {
             .font(.callout.weight(.semibold))
             .foregroundStyle(isError ? MaterialTheme.red : MaterialTheme.green)
             .padding(.horizontal, 10)
-            .frame(height: 30)
+            .frame(height: 32)
             .background(isError ? MaterialTheme.redContainer : MaterialTheme.greenContainer)
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .frame(maxWidth: .infinity, alignment: .trailing)
@@ -988,9 +1102,9 @@ private struct DirectionCluster: View {
     @EnvironmentObject private var model: BridgeModel
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             HitboxButton(mapping: mapping("UP"), size: .large, role: .direction)
-            HStack(spacing: 10) {
+            HStack(spacing: 12) {
                 HitboxButton(mapping: mapping("LEFT"), size: .large, role: .direction)
                 HitboxButton(mapping: mapping("DOWN"), size: .large, role: .direction)
                 HitboxButton(mapping: mapping("RIGHT"), size: .large, role: .direction)
@@ -1013,9 +1127,9 @@ private struct AttackGrid: View {
     ]
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 14) {
             ForEach(rows, id: \.self) { row in
-                HStack(spacing: 12) {
+                HStack(spacing: 14) {
                     ForEach(row, id: \.self) { control in
                         HitboxButton(mapping: mapping(control), size: .medium, role: .attack)
                     }
@@ -1033,7 +1147,7 @@ private struct FunctionRow: View {
     @EnvironmentObject private var model: BridgeModel
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 14) {
             Spacer(minLength: 0)
             HitboxButton(mapping: mapping("LSB"), size: .small, role: .function)
             HitboxButton(mapping: mapping("RSB"), size: .small, role: .function)
@@ -1093,33 +1207,35 @@ private struct HitboxButton: View {
 
     private var dimension: CGFloat {
         switch size {
-        case .large: return 68
-        case .medium: return 62
-        case .small: return 56
+        case .large: return 74
+        case .medium: return 68
+        case .small: return 58
         }
     }
 
     private var labelFont: Font {
-        size == .small ? .caption.weight(.semibold) : .callout.weight(.semibold)
+        size == .small ? .caption.weight(.bold) : .callout.weight(.bold)
     }
 
     private var keyFont: Font {
         size == .small
             ? .system(.body, design: .monospaced).weight(.bold)
-            : .system(.title3, design: .monospaced).weight(.bold)
+            : .system(.title2, design: .monospaced).weight(.bold)
     }
 
     var body: some View {
         Button {
             model.beginRecording(control: mapping.control)
         } label: {
-            VStack(spacing: 3) {
+            VStack(spacing: 4) {
                 Text(mapping.control)
                     .font(labelFont)
                     .foregroundStyle(isRecording ? MaterialTheme.primary : role.foreground)
                 Text(keyText)
                     .font(keyFont)
                     .foregroundStyle(isRecording ? MaterialTheme.primary : MaterialTheme.text)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.68)
             }
             .frame(width: dimension, height: dimension)
         }
@@ -1129,6 +1245,7 @@ private struct HitboxButton: View {
             roleColor: role.foreground,
             roleContainer: role.container
         ))
+        .accessibilityLabel("\(mapping.control) mapped to \(keyText)")
     }
 }
 
@@ -1139,7 +1256,7 @@ private struct LogPanel: View {
         MaterialSurface {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Label("Bridge Log", systemImage: "terminal")
+                    Label("Diagnostics", systemImage: "terminal")
                         .font(.headline)
                         .foregroundStyle(MaterialTheme.text)
                     Spacer()
@@ -1162,19 +1279,19 @@ private struct LogPanel: View {
                             VStack(spacing: 8) {
                                 Image(systemName: "terminal")
                                     .font(.system(size: 22, weight: .medium))
-                                    .foregroundStyle(MaterialTheme.secondaryText)
-                                Text("Bridge activity will appear here.")
+                                    .foregroundStyle(MaterialTheme.inverseSecondaryText)
+                                Text("Waiting for bridge activity")
                                     .font(.callout.weight(.medium))
-                                    .foregroundStyle(MaterialTheme.secondaryText)
+                                    .foregroundStyle(MaterialTheme.inverseSecondaryText)
                             }
                             .frame(maxWidth: .infinity, minHeight: 110)
                         } else {
                             Text(model.logText)
                                 .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(MaterialTheme.text)
+                                .foregroundStyle(MaterialTheme.inverseText)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .textSelection(.enabled)
-                                .padding(10)
+                                .padding(12)
                         }
                     }
                     .frame(minHeight: 130)
@@ -1182,7 +1299,7 @@ private struct LogPanel: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .overlay(
                         RoundedRectangle(cornerRadius: 8)
-                            .stroke(MaterialTheme.outline, lineWidth: 1)
+                            .stroke(Color.white.opacity(0.11), lineWidth: 1)
                     )
                 }
             }
@@ -1197,11 +1314,11 @@ private struct BridgeStatusIndicator: View {
     var body: some View {
         Circle()
             .fill(color)
-            .frame(width: 11, height: 11)
-            .padding(9)
-            .background(color.opacity(0.14))
+            .frame(width: 10, height: 10)
+            .padding(5)
+            .background(color.opacity(0.18))
             .clipShape(Circle())
-            .shadow(color: color.opacity(kind == .idle ? 0 : 0.32), radius: 4)
+            .shadow(color: color.opacity(kind == .idle ? 0 : 0.38), radius: 5)
             .help("Bridge: \(text)")
             .accessibilityLabel("Bridge status: \(text)")
     }
@@ -1211,7 +1328,7 @@ private struct BridgeStatusIndicator: View {
         case .running: return MaterialTheme.green
         case .pending: return MaterialTheme.orange
         case .error: return MaterialTheme.red
-        case .idle: return MaterialTheme.secondaryText
+        case .idle: return MaterialTheme.inverseSecondaryText
         }
     }
 }
@@ -1227,6 +1344,7 @@ private struct FilledMaterialButtonStyle: ButtonStyle {
             .frame(height: 32)
             .background(background(configuration: configuration))
             .clipShape(RoundedRectangle(cornerRadius: 8))
+            .shadow(color: MaterialTheme.primary.opacity(isEnabled ? 0.22 : 0), radius: 5, x: 0, y: 2)
     }
 
     private func background(configuration: Configuration) -> Color {
@@ -1244,7 +1362,7 @@ private struct OutlinedMaterialButtonStyle: ButtonStyle {
             .foregroundStyle(isEnabled ? MaterialTheme.primary : MaterialTheme.secondaryText)
             .padding(.horizontal, 12)
             .frame(height: 32)
-            .background(MaterialTheme.surface.opacity(configuration.isPressed ? 0.55 : 1.0))
+            .background(MaterialTheme.surfaceRaised.opacity(configuration.isPressed ? 0.68 : 1.0))
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
@@ -1265,24 +1383,36 @@ private struct HitboxButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .frame(width: dimension, height: dimension)
-            .background(background(isPressed: configuration.isPressed))
-            .clipShape(Circle())
+            .background(
+                Circle()
+                    .fill(background(isPressed: configuration.isPressed))
+            )
             .overlay(
                 Circle()
-                    .stroke(active ? MaterialTheme.primary : roleColor.opacity(0.52),
-                            lineWidth: active ? 2 : 1)
+                    .stroke(active ? MaterialTheme.primaryContainer : roleColor.opacity(0.70),
+                            lineWidth: active ? 3 : 1.5)
             )
-            .shadow(color: MaterialTheme.text.opacity(active ? 0.13 : 0.07),
-                    radius: isEnabled ? (active ? 7 : 3) : 0,
+            .overlay(
+                Circle()
+                    .stroke(Color.white.opacity(0.42), lineWidth: 1)
+                    .padding(5)
+            )
+            .shadow(color: Color.black.opacity(active ? 0.33 : 0.24),
+                    radius: isEnabled ? (active ? 10 : 6) : 0,
                     x: 0,
-                    y: active ? 3 : 1)
-            .scaleEffect(configuration.isPressed ? 0.96 : 1.0)
-            .opacity(isEnabled ? 1.0 : 0.42)
+                    y: active ? 5 : 3)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+            .opacity(isEnabled ? 1.0 : 0.38)
     }
 
-    private func background(isPressed: Bool) -> Color {
-        if active { return MaterialTheme.primaryContainer }
-        return isPressed ? roleContainer.opacity(0.78) : roleContainer.opacity(0.48)
+    private func background(isPressed: Bool) -> LinearGradient {
+        let top = active ? MaterialTheme.primaryContainer : roleContainer
+        let bottom = active ? MaterialTheme.surfaceRaised : roleContainer.opacity(isPressed ? 0.74 : 0.48)
+        return LinearGradient(
+            colors: [top, bottom],
+            startPoint: .top,
+            endPoint: .bottom
+        )
     }
 }
 
@@ -1290,10 +1420,14 @@ private struct QuitButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(MaterialTheme.red)
-            .frame(width: 30, height: 30)
-            .background(MaterialTheme.redContainer.opacity(configuration.isPressed ? 1.0 : 0.72))
+            .foregroundStyle(MaterialTheme.redContainer)
+            .frame(width: 34, height: 34)
+            .background(MaterialTheme.red.opacity(configuration.isPressed ? 0.42 : 0.24))
             .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(MaterialTheme.red.opacity(0.38), lineWidth: 1)
+            )
     }
 }
 
